@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexmaze-sweeps"
+version = "0.1.0"
+description = "Reproduction of Vollan et al. 2025 theta-sweep analysis on HexMaze hippocampal recordings"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Minh Phan" }]
+license = { text = "MIT" }
+
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "pynwb>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+hexmaze-sweeps = "hexmaze_sweeps.pipeline:main"
+
+[project.urls]
+Repository = "https://github.com/hmp94/Reproduce-Theta-Sweeps-from-HexMaze-dataset"
+
+[tool.setuptools.packages.find]
+include = ["hexmaze_sweeps*"]
