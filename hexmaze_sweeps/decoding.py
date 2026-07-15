@@ -2,10 +2,19 @@
 
     theta_cycles -> rate_maps -> decode -> lowpass_trajectory
 
-The decoder is the authors' population-vector correlation (`decodePv.m`), not Bayesian:
-for each time bin it correlates the population's activity ACROSS CELLS against its average
-activity at each maze position, then reads out a thresholded centre of mass (`processDec`)
-rather than the single best position, which would quantise onto the grid.
+Two decoders, because the paper's Methods text and the paper's released code do not agree
+about which one it used. `Config.decoder` picks:
+
+* "pv"    -- the authors' population-vector correlation (`decodePv.m`), which is what their
+             code actually runs: for each time bin, correlate the population's activity
+             ACROSS CELLS against its average activity at each maze position;
+* "bayes" -- Poisson rate-map reconstruction, which is what their Methods text describes.
+
+They differ only in how the (n_time_bins, n_positions) score matrix is produced.
+`prepare_tuning` feeds each the form it needs -- and they need different forms, so do not
+cross the wires. Everything downstream just wants the score to be higher where the position
+fits better, so it is shared: a thresholded centre of mass (`processDec`) rather than the
+single best position, which would quantise onto the grid.
 
 `lowpass_trajectory` is the anchor -- a slowly-moving decoded position, taken from the
 first 40 ms of each theta cycle before the sweep departs. Sweeps are measured against it,
@@ -107,19 +116,31 @@ def theta_cycles(session: Session, config: Config) -> np.ndarray:
 # =============================================================================
 # Rate maps -- each cell's average firing rate at each position
 # =============================================================================
-def rate_maps(session: Session, config: Config):
+def rate_maps(session: Session, config: Config, include_bins: np.ndarray | None = None):
     """Build the tuning curves the decoder compares against.
 
+    Rates are returned in spikes per second, NOT yet in the form either decoder wants --
+    `prepare_tuning` does that, because the two want different things (the PV decoder
+    mean-normalises each cell; the Bayesian one needs the rates themselves).
+
+    Args:
+        include_bins: optional boolean mask over time bins. When given, only those bins
+            contribute to the maps -- this is how `cross_validate_smoothing` holds a fold
+            out. The spatial grid still spans the whole session, so bin centres stay
+            comparable across folds; only which bins are counted changes.
+
     Returns:
-        tuning_curves: (n_positions, n_units), each column divided by that cell's mean
-            rate so high-firing cells cannot dominate the correlation (decodePv.m).
-        bin_center_x_px, bin_center_y_px: (n_positions,) -- visited positions only.
+        tuning_hz: (n_positions, n_units), each cell's firing rate at each position.
+        bin_center_x_px, bin_center_y_px: (n_positions,).
+        occupancy_s: (n_positions,) -- seconds spent at each, for the Bayesian prior.
     """
     bin_size_px = config.px(config.spatial_bin_cm)
     smooth_sigma_bins = config.px(config.rate_smooth_cm) / bin_size_px
 
     is_running = (session.speed_px_s > config.px(config.speed_spatial_cm_s)) \
         & np.isfinite(session.speed_px_s)
+    if include_bins is not None:
+        is_running = is_running & include_bins
 
     # --- diving maze into smaller grid ---------------------------------------------
     x_edges_px = np.arange(np.nanmin(session.track_x_px),
@@ -164,10 +185,109 @@ def rate_maps(session: Session, config: Config):
     bin_center_x_px = (0.5 * (x_edges_px[:-1] + x_edges_px[1:]))[:, None].repeat(n_y_bins, 1).ravel()[visited]
     bin_center_y_px = (0.5 * (y_edges_px[:-1] + y_edges_px[1:]))[None, :].repeat(n_x_bins, 0).ravel()[visited]
 
-    tuning_curves = maps.reshape(session.n_units, -1)[:, visited].T
-    tuning_curves = tuning_curves / (tuning_curves.mean(0, keepdims=True) + 1e-9)
+    tuning_hz = maps.reshape(session.n_units, -1)[:, visited].T
+    return tuning_hz, bin_center_x_px, bin_center_y_px, occupancy_s.ravel()[visited]
 
-    return tuning_curves, bin_center_x_px, bin_center_y_px
+
+# =============================================================================
+# Putting the rate maps into the form the chosen decoder wants
+# =============================================================================
+def prepare_tuning(tuning_hz: np.ndarray, config: Config) -> np.ndarray:
+    """Rate maps -> what the decoder actually correlates or integrates against.
+
+    The two decoders want different things from the same rate maps, and giving either the
+    other's form is silently wrong rather than loud:
+
+    * PV correlation divides each cell by its own mean rate (`decodePv.m` line 24), so that
+      a high-firing cell cannot dominate a correlation taken ACROSS cells. This is a
+      per-cell rescaling, and Pearson r across cells is not invariant to it, so it matters.
+    * Bayesian reconstruction needs the rates themselves, in spikes per second, because the
+      Poisson likelihood is a statement about how many spikes a rate produces in `bin_s`.
+      Mean-normalising first would make `exp(-tau * sum(f))` meaningless.
+    """
+    if config.decoder == "bayes":
+        return np.maximum(tuning_hz, config.bayes_min_rate_hz)
+    return tuning_hz / (tuning_hz.mean(0, keepdims=True) + 1e-9)
+
+
+def prepare_log_prior(occupancy_s: np.ndarray, config: Config) -> np.ndarray | None:
+    """log P(x) for the Bayesian decoder. None means a flat prior (and for PV, unused)."""
+    if config.decoder != "bayes" or config.bayes_prior != "occupancy":
+        return None
+
+    prior = occupancy_s / occupancy_s.sum()
+    return np.log(prior + 1e-12)
+
+
+def cross_validate_smoothing(session: Session, config: Config, candidates_cm=None,
+                             n_folds=None, max_test_bins=4000, seed=0, on_progress=None):
+    """Pick the rate-map smoothing width that best predicts held-out position.
+
+    The paper's Methods step 1: "select smoothing kernel size that maximises
+    cross-validated prediction quality". For each candidate sigma, build the tuning curves
+    on the training folds, decode the held-out fold with whichever decoder `config` selects,
+    and score by the median decoding error. The width with the lowest mean error wins.
+
+    Folds are BLOCKED (contiguous spans of running bins), not interleaved. At 10 ms adjacent
+    bins are almost identical, so a random split would put a bin's near-copy in the training
+    set and make decoding look far better than it is. Blocked folds keep train and test
+    genuinely separated in time.
+
+    Returns:
+        (best_cm, errors_cm) -- the chosen width, and {sigma_cm: mean CV error in cm} for all
+        candidates so the whole curve can be inspected, not just the argmin.
+    """
+    from dataclasses import replace
+
+    candidates_cm = candidates_cm or config.cv_smoothing_candidates_cm
+    n_folds = n_folds or config.cv_folds
+    rng = np.random.default_rng(seed)
+
+    running = (session.speed_px_s > config.px(config.speed_spatial_cm_s)) \
+        & np.isfinite(session.speed_px_s)
+    running_idx = np.where(running)[0]                       # time-ordered
+    if len(running_idx) < n_folds:
+        raise ValueError("too few running bins to cross-validate")
+
+    # Blocked folds: contiguous slices of the running bins, so each test fold is one span.
+    fold_slices = np.array_split(np.arange(len(running_idx)), n_folds)
+
+    # The smoothed activity the decoder sees does not depend on sigma, so smooth once.
+    activity = gaussian_filter1d(session.spike_counts, config.pv_smooth_bins, axis=0)
+    true_xy_px = np.column_stack([session.track_x_px, session.track_y_px])
+
+    errors_cm: dict[float, float] = {}
+    for s, sigma_cm in enumerate(candidates_cm, 1):
+        cfg = replace(config, rate_smooth_cm=sigma_cm)
+        fold_errors = []
+
+        for fold, test_positions in enumerate(fold_slices, 1):
+            test_bins = running_idx[test_positions]
+            train_mask = np.ones(session.n_bins, bool)
+            train_mask[test_bins] = False
+
+            tuning_hz, bx, by, occ = rate_maps(session, cfg, include_bins=train_mask)
+            tuning = prepare_tuning(tuning_hz, cfg)
+            log_prior = prepare_log_prior(occ, cfg)
+
+            if len(test_bins) > max_test_bins:                # subsample for speed
+                test_bins = rng.choice(test_bins, max_test_bins, replace=False)
+
+            scores = decoder_scores(activity[test_bins], tuning, cfg, log_prior)
+            decoded, _ = _thresholded_centroid(scores, bx, by, cfg)
+
+            error_px = np.hypot(decoded[:, 0] - true_xy_px[test_bins, 0],
+                                decoded[:, 1] - true_xy_px[test_bins, 1])
+            fold_errors.append(np.nanmedian(error_px))
+
+            if on_progress:
+                on_progress(f"cv sigma {sigma_cm:g}cm  fold {fold}/{n_folds}  "
+                            f"({s}/{len(candidates_cm)})")
+
+        errors_cm[sigma_cm] = float(np.mean(fold_errors)) / config.px_per_cm
+
+    best_cm = min(errors_cm, key=errors_cm.get)
+    return best_cm, errors_cm
 
 
 # =============================================================================
@@ -185,95 +305,138 @@ def _correlate_across_units(activity: np.ndarray, tuning_curves: np.ndarray) -> 
     return (activity_z @ tuning_z.T) / activity.shape[1]
 
 
+def _bayes_posterior(activity, tuning_hz, config: Config, log_prior=None) -> np.ndarray:
+    """Poisson posterior over position, one row per time bin. (T, n_units) -> (T, P).
+
+    The standard rate-map reconstruction (Zhang et al. 1998; the same formulation
+    pynapple's `decode_2d` uses), which is what the paper's Methods text describes even
+    though the released code ships the PV-correlation decoder instead:
+
+        log P(x | n)  =  sum_i n_i log f_i(x)  -  tau sum_i f_i(x)  +  log P(x)  +  const
+
+    `const` absorbs `-sum_i log(n_i!)`, which does not depend on position and therefore
+    cannot move the decoded position. That is what lets the SMOOTHED spike counts the PV
+    decoder uses be passed in here unchanged: they are not integers, so the factorial term
+    would be ill-defined, but it drops out of the posterior anyway.
+    """
+    log_likelihood = (activity @ np.log(tuning_hz).T
+                      - config.bin_s * tuning_hz.sum(1)[None, :])
+
+    if log_prior is not None:
+        log_likelihood = log_likelihood + log_prior[None, :]
+
+    # Subtract the row max before exponentiating, or 83 cells' worth of log-rates underflow.
+    log_likelihood -= log_likelihood.max(1, keepdims=True)
+    posterior = np.exp(log_likelihood)
+    return posterior / posterior.sum(1, keepdims=True)
+
+
+def decoder_scores(activity, tuning, config: Config, log_prior=None) -> np.ndarray:
+    """(n_time_bins, n_units) -> (n_time_bins, n_positions). Higher means a better match.
+
+    A correlation for `decoder="pv"`, a posterior probability for `decoder="bayes"`.
+    Everything downstream -- the centroid, the shuffle, the anchor -- only asks that the
+    score be higher where the position fits better, so it does not care which it is.
+    """
+    if config.decoder == "bayes":
+        return _bayes_posterior(activity, tuning, config, log_prior)
+    return _correlate_across_units(activity, tuning)
+
+
 def _bin_distance_matrix_px(bin_center_x_px, bin_center_y_px) -> np.ndarray:
     """Distance between every pair of position bins. Computed once, reused per chunk."""
     return np.hypot(bin_center_x_px[:, None] - bin_center_x_px[None, :],
                     bin_center_y_px[:, None] - bin_center_y_px[None, :]).astype(np.float32)
 
 
-def _thresholded_centroid(correlations, bin_center_x_px, bin_center_y_px, config,
+def _thresholded_centroid(scores, bin_center_x_px, bin_center_y_px, config,
                           bin_distance_px=None):
-    """Turn a map of correlations into one decoded position per time bin.
+    """Turn a map of decoder scores into one decoded position per time bin.
 
     A weighted average of the good positions, rather than the single best one, which
     would quantise onto the grid (processDec, inside runPvPosDecoding.m). A position
     counts as good if it is among the top few percent anywhere, or lies close to the peak.
 
     Returns:
-        (decoded position per bin, peak correlation per bin).
+        (decoded position per bin, peak score per bin).
     """
     if bin_distance_px is None:
         bin_distance_px = _bin_distance_matrix_px(bin_center_x_px, bin_center_y_px)
 
-    peak_bin = correlations.argmax(1)
-    peak_correlation = correlations[np.arange(len(correlations)), peak_bin]
+    peak_bin = scores.argmax(1)
+    peak_score = scores[np.arange(len(scores)), peak_bin]
 
-    n_positions = correlations.shape[1]
+    n_positions = scores.shape[1]
     kth = int(np.clip(round(config.centroid_percentile / 100.0 * (n_positions - 1)),
                       0, n_positions - 1))
-    threshold = np.partition(correlations, kth, axis=1)[:, kth][:, None]
+    threshold = np.partition(scores, kth, axis=1)[:, kth][:, None]
 
-    weights = correlations.copy()
+    weights = scores.copy()
     is_far_from_peak = bin_distance_px[peak_bin] > config.px(config.centroid_radius_cm)
-    weights[(correlations < threshold) & is_far_from_peak] = 0.0
+    weights[(scores < threshold) & is_far_from_peak] = 0.0
 
-    # A negative weight would drag the centroid to the wrong side of the maze.
-    np.clip(weights, 0, None, out=weights)
+    # `processDec` stops here, so by default so do we -- which leaves a negative weight on
+    # any position that is anti-correlated but close to the peak, dragging the centroid
+    # away from it. See `Config.clip_negative_weights`.
+    if config.clip_negative_weights:
+        np.clip(weights, 0, None, out=weights)
 
     weight_sum = weights.sum(1)
     weight_sum[weight_sum == 0] = np.nan            # nothing matched
     centroid = np.stack([(weights * bin_center_x_px).sum(1) / weight_sum,
                          (weights * bin_center_y_px).sum(1) / weight_sum], 1)
-    return centroid, peak_correlation
+    return centroid, peak_score
 
 
-def decode(session, config, tuning_curves, bin_center_x_px, bin_center_y_px, chunk_size=8000,
-           on_progress=None):
+def decode(session, config, tuning, bin_center_x_px, bin_center_y_px, log_prior=None,
+           chunk_size=8000, on_progress=None):
     """Decode the encoded position in every time bin.
 
-    Chunked only to bound memory: the full (n_time_bins, n_positions) correlation
-    matrix would not fit. This is the slowest stage, so it reports its progress.
+    `tuning` must already have been through `prepare_tuning`. Chunked only to bound
+    memory: the full (n_time_bins, n_positions) score matrix would not fit. This is the
+    slowest stage, so it reports its progress.
     """
     activity = gaussian_filter1d(session.spike_counts, config.pv_smooth_bins, axis=0)
     bin_distance_px = _bin_distance_matrix_px(bin_center_x_px, bin_center_y_px)
 
     decoded_xy_px = np.full((session.n_bins, 2), np.nan)
-    peak_correlation = np.full(session.n_bins, np.nan)
+    peak_score = np.full(session.n_bins, np.nan)
 
     starts = range(0, session.n_bins, chunk_size)
     report_every = max(1, len(starts) // 10)        # ~10 updates, not one per chunk
 
     for done, start in enumerate(starts, 1):
         chunk = slice(start, start + chunk_size)
-        correlations = _correlate_across_units(activity[chunk], tuning_curves)
-        decoded_xy_px[chunk], peak_correlation[chunk] = _thresholded_centroid(
-            correlations, bin_center_x_px, bin_center_y_px, config, bin_distance_px)
+        scores = decoder_scores(activity[chunk], tuning, config, log_prior)
+        decoded_xy_px[chunk], peak_score[chunk] = _thresholded_centroid(
+            scores, bin_center_x_px, bin_center_y_px, config, bin_distance_px)
 
         if on_progress and (done % report_every == 0 or done == len(starts)):
             on_progress(f"decoding {100 * done / len(starts):.0f}%")
 
-    return decoded_xy_px, peak_correlation
+    return decoded_xy_px, peak_score
 
 
-def shuffle_threshold(session, config, tuning_curves, seed=0) -> float:
-    """Correlation the decoder reaches by chance.
+def shuffle_threshold(session, config, tuning, log_prior=None, seed=0) -> float:
+    """The score the decoder reaches by chance.
 
     Rotating each cell's spike train in time keeps its rate and rhythmicity but destroys
     its relationship to place and to the other cells. Returns the 99th percentile of the
-    resulting correlations.
+    resulting scores -- a correlation for `decoder="pv"`, a posterior for `"bayes"`.
     """
     rng = np.random.default_rng(seed)
     shifted = np.stack([np.roll(session.spike_counts[:, unit], rng.integers(session.n_bins))
                         for unit in range(session.n_units)], 1)
 
     n_samples = min(config.n_shuffle_bins, session.n_bins)
-    correlations = _correlate_across_units(
-        gaussian_filter1d(shifted[:n_samples], config.pv_smooth_bins, axis=0), tuning_curves)
-    return float(np.percentile(correlations, config.shuffle_percentile))
+    scores = decoder_scores(
+        gaussian_filter1d(shifted[:n_samples], config.pv_smooth_bins, axis=0),
+        tuning, config, log_prior)
+    return float(np.percentile(scores, config.shuffle_percentile))
 
 
-def lowpass_trajectory(session, config, tuning_curves, bin_center_x_px, bin_center_y_px,
-                       cycle_onsets) -> np.ndarray:
+def lowpass_trajectory(session, config, tuning, bin_center_x_px, bin_center_y_px,
+                       cycle_onsets, log_prior=None) -> np.ndarray:
     """The anchor: a slowly-moving decoded position that sweeps depart from.
 
     Decoded from the first 40 ms of each theta cycle, before the sweep has travelled,
@@ -291,7 +454,7 @@ def lowpass_trajectory(session, config, tuning_curves, bin_center_x_px, bin_cent
                                            config.anchor_smooth_cycles, axis=0)
 
     cycle_xy_px, _ = _thresholded_centroid(
-        _correlate_across_units(cycle_spike_counts, tuning_curves),
+        decoder_scores(cycle_spike_counts, tuning, config, log_prior),
         bin_center_x_px, bin_center_y_px, config)
 
     # Fill unmatched cycles before smoothing, or one NaN spreads across its neighbours.

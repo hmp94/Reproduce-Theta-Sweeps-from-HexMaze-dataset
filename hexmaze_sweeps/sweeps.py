@@ -93,17 +93,20 @@ def distance_outside_visited_cm(points_px, track_x_px, track_y_px, config: Confi
 # =============================================================================
 # Sweep extraction (chunkThetaPosSweeps.m)
 # =============================================================================
-def _mark_unreliable_bins(session, config, peak_correlation, lowpass_error_px, shuffle_99):
+def _mark_unreliable_bins(session, config, peak_score, lowpass_error_px, shuffle_99):
     """Which decoded time bins to discard. See `Config` for the thresholds."""
     n_active_cells = (session.spike_counts > 0).sum(1)
 
     too_few_cells = n_active_cells < config.min_active_cells
     decoder_lost_the_animal = lowpass_error_px > config.px(config.max_lowpass_error_cm)
 
-    if config.min_peak_correlation is None:
-        poor_match = peak_correlation < shuffle_99
+    # A posterior probability is never negative, so the hippocampal branch's floor of 0
+    # would be a gate that never fires -- i.e. silently no gate at all. Bayesian decoding
+    # therefore always measures its peak against the shuffled null instead.
+    if config.decoder == "bayes" or config.min_peak_correlation is None:
+        poor_match = peak_score < shuffle_99
     else:
-        poor_match = peak_correlation < config.min_peak_correlation
+        poor_match = peak_score < config.min_peak_correlation
 
     return too_few_cells | decoder_lost_the_animal | poor_match
 
@@ -262,10 +265,19 @@ def extract_sweeps(session, config, decoded_xy_px, peak_correlation,
     sweeps["is_running"] = sweeps["speed_px_s"] > config.px(config.speed_sweep_cm_s)
     sweeps["starts_at_animal"] = sweeps["origin_error_px"] <= config.px(config.max_sweep_origin_cm)
 
+    # A sweep should point ahead of the animal; the head-centred angle says how far off the
+    # head direction it is. Off by default (see Config.max_sweep_head_angle_deg).
+    head_centred = _wrap_angle(sweeps["direction"] - sweeps["head_direction"])
+    if config.max_sweep_head_angle_deg is None:
+        sweeps["points_forward"] = np.ones(n_cycles, bool)
+    else:
+        sweeps["points_forward"] = np.abs(head_centred) <= np.radians(config.max_sweep_head_angle_deg)
+
     sweeps["is_sweep"] = (sweeps["n_valid_samples"] >= config.min_valid_samples) \
         & (sweeps["straightness"] > config.straightness_min) \
         & sweeps["is_running"] \
-        & sweeps["starts_at_animal"]
+        & sweeps["starts_at_animal"] \
+        & sweeps["points_forward"]
 
     sweeps["prevalence"] = sweeps["is_sweep"].sum() / max(sweeps["is_running"].sum(), 1)
     return sweeps
