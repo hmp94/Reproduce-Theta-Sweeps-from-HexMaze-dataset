@@ -1,18 +1,16 @@
 """Reading one NWB file, and deciding whether to trust what is in it.
 
-Two things in this dataset lie about themselves, so both get a preflight that runs before
-the analysis and prints a table:
+The LFP sampling rate in this dataset lies about itself: 6 of 10 files stamp a 1 kHz LFP
+with the 30 kHz acquisition rate, and `np.interp` then silently freezes theta phase rather
+than extrapolating. `check_lfp_rates` is a preflight that runs before the analysis and
+prints a table.
 
-* the LFP sampling rate -- 6 of 10 files stamp a 1 kHz LFP with the 30 kHz acquisition
-  rate, and `np.interp` then silently freezes theta phase rather than extrapolating
-  (`check_lfp_rates`);
-* the DLC body parts -- the keypoints jump around, because DeepLabCut's likelihood column
-  is dropped when the NWB is written, so nothing filters low-confidence frames
-  (`check_head_direction`).
-
-Head direction comes either from two DLC body parts (`head_direction_source="dlc"`) or,
-where DLC is missing or untrustworthy, from the direction of travel. Travel direction is
-only a good proxy while the animal runs, hence the 15 cm/s gate on anything using it.
+Head direction comes either from two DLC body parts (`head_direction_source="dlc"`) or, by
+default, from the direction of travel. The DLC keypoints are not trustworthy on this
+dataset -- they jump around, because DeepLabCut's likelihood column is dropped when the
+NWB is written, so nothing filters low-confidence frames; see docs/data-issues.md. Travel
+direction is only a good proxy while the animal runs, hence the 15 cm/s gate on anything
+using it.
 """
 from __future__ import annotations
 
@@ -420,121 +418,3 @@ def measure_px_per_cm(node_xy_px: np.ndarray, segment_cm: float = SEGMENT_CM) ->
     distances = cdist(node_xy_px, node_xy_px)
     np.fill_diagonal(distances, np.inf)         # a node is not its own neighbour
     return float(np.median(distances.min(1)) / segment_cm)
-
-
-# =============================================================================
-# Is the DLC head direction trustworthy?
-# =============================================================================
-MAX_SEGMENT_CV = 0.20           # a rigid body segment barely changes length
-MIN_TRAVEL_AGREEMENT = 0.60     # a running animal's body points where it is going
-
-
-class HeadDirectionCheck(NamedTuple):
-    """How believable one session's DLC head direction is.
-
-    `segment_cv` is the variability of the distance between the two body parts. They sit
-    on the same rigid body, so it should be small; a large value means the points jump.
-    `travel_agreement` is the circular concordance with the direction of travel while
-    running, from 0 (unrelated) to 1 (identical).
-    """
-
-    has_dlc: bool
-    tracked_fraction: float
-    segment_cv: float
-    travel_agreement: float
-    note: str
-
-    @property
-    def usable(self) -> bool:
-        return (self.has_dlc and self.segment_cv < MAX_SEGMENT_CV
-                and self.travel_agreement > MIN_TRAVEL_AGREEMENT)
-
-
-def check_head_direction(nwb_paths, config: Config | None = None) -> dict[str, HeadDirectionCheck]:
-    """Test every session's DLC head direction before trusting it. Computes only."""
-    config = config or Config()
-    front_name, back_name = config.dlc_head_parts
-    records: dict[str, HeadDirectionCheck] = {}
-
-    for index, path in enumerate(nwb_paths, 1):
-        status(f"  DLC check [{index}/{len(nwb_paths)}] {os.path.basename(path)} ...")
-
-        nwb_io = NWBHDF5IO(path, "r")
-        try:
-            nwb = nwb_io.read()
-            name = os.path.basename(path)
-            behavior = nwb.processing["Behavior"]
-
-            if "DLC_Position" not in behavior.data_interfaces:
-                records[name] = HeadDirectionCheck(
-                    False, 0.0, np.nan, np.nan, "no DLC_Position in this file")
-                continue
-
-            dlc = behavior["DLC_Position"]
-            front_xy = dlc[front_name].data[:].astype(float)
-            back_xy = dlc[back_name].data[:].astype(float)
-            dlc_t_s = dlc[front_name].timestamps[:].astype(float)
-            track_xy = behavior["Position"]["Rat"].data[:].astype(float)
-
-            # --- direction of travel at the video frame rate, as a reference ---
-            frame_s = float(np.median(np.diff(dlc_t_s)))
-            velocity = np.gradient(track_xy, axis=0)
-            travel = np.arctan2(velocity[:, 1], velocity[:, 0])
-            speed_px_s = np.hypot(velocity[:, 0], velocity[:, 1]) / frame_s
-
-            tracked = np.isfinite(front_xy).all(1) & np.isfinite(back_xy).all(1)
-            usable = tracked & np.isfinite(travel) & np.isfinite(speed_px_s)
-
-            # --- test 1: does the body segment keep its length? ---
-            segment_px = np.hypot(*(front_xy - back_xy)[tracked].T)
-            segment_cv = float(segment_px.std() / (segment_px.mean() + 1e-9))
-
-            # --- test 2: does it agree with travel while running? ---
-            head_direction = calc_head_direction(
-                np.column_stack([dlc_t_s[usable], front_xy[usable], back_xy[usable]]))
-            running = speed_px_s[usable] > config.px(config.speed_sweep_cm_s)
-
-            agreement = (float(np.abs(np.mean(np.exp(
-                1j * (head_direction[running] - travel[usable][running])))))
-                if running.sum() else np.nan)
-
-            records[name] = HeadDirectionCheck(
-                True, float(tracked.mean()), segment_cv, agreement, "")
-        finally:
-            nwb_io.close()
-
-    status()
-    return records
-
-
-def print_head_direction_check(records: dict[str, HeadDirectionCheck]) -> int:
-    """Print `check_head_direction` as a table. Returns how many sessions are unusable."""
-
-    columns = (f"{'session':<24}{'tracked':>9}{'segment CV':>12}{'vs travel':>11}  {'verdict':<9}")
-
-    print(f"DLC head-direction check  (segment CV < {MAX_SEGMENT_CV}, "
-          f"travel agreement > {MIN_TRAVEL_AGREEMENT})")
-    print(columns)
-    print("-" * len(columns))
-
-    for name, record in records.items():
-        if not record.has_dlc:
-            print(f"{name:<24}{'':>9}{'':>12}{'':>11}  {'NO DLC':<9}")
-            continue
-        print(f"{name:<24}"
-              f"{record.tracked_fraction * 100:>8.1f}%"
-              f"{record.segment_cv:>12.2f}"
-              f"{record.travel_agreement:>11.2f}"
-              f"  {'ok' if record.usable else 'UNUSABLE':<9}")
-
-    print("-" * len(columns))
-
-    unusable = [name for name, record in records.items() if not record.usable]
-    if not unusable:
-        print("all sessions: DLC head direction looks trustworthy")
-        return 0
-
-    print(f"{len(unusable)} of {len(records)} sessions have unusable DLC head direction. "
-          f"A high segment CV means the body parts jump around; low agreement with travel "
-          f"means the angle does not follow the animal.")
-    return len(unusable)

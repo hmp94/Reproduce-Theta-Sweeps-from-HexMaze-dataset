@@ -94,23 +94,34 @@ class Config:
     speed_spatial_cm_s: float = 5.0         # a rate map describes where a cell fires while moving
     min_occupancy_s: float = 0.25           # drop positions the animal barely visited
 
-    # How far beyond the visited area the decoder may place the animal. A sweep is
-    # supposed to be able to leave the travelled path -- the paper's central claim is that
-    # sweeps reach never-visited, inaccessible locations -- so the position bins must not
-    # stop at the edge of where the animal went. Dilating the visited region by roughly a
-    # sweep length reproduces the authors' rectangular arena grid without carrying the
-    # 92% of a hex maze that is wall.
-    #
-    # Note the ceiling: a PV-correlation decoder can only reach as far out as the rate-map
-    # smoothing carries a cell's tuning, because unvisited bins have no data of their own.
-    # The paper hits this limit too, and switches to the LMT model to go further.
-    unvisited_margin_cm: float = 0.0        # 0 = visited bins only
+    # The paper picks the smoothing width by cross-validation, not a fixed value (Methods
+    # step 1). `--cv-smoothing` does this per session; off by default because it is slow.
+    cv_smoothing: bool = False
+    cv_smoothing_candidates_cm: tuple = (2.5, 5.0, 7.5, 10.0, 12.5, 15.0)
+    cv_folds: int = 10                      # the paper's 10-fold
+
+    # How far past the visited area a sweep may be decoded. Their state space is the whole
+    # rectangle, which in a 1.5 m open field IS the environment; a 9 x 5 m hex maze is 92%
+    # wall, so we dilate the visited bins instead. Default = 3 sigma of the rate-map
+    # smoothing, the decoder's reach limit (past it no tuning is carried). 0 = visited only.
+    unvisited_margin_cm: float = 22.5       # = 3 * rate_smooth_cm
 
     # -- decoder (decodePv.m, processDec) ---------------------------------------
+    # "pv"    -- population-vector correlation across cells (decodePv.m), what the authors'
+    #            released code actually runs.
+    # "bayes" -- Poisson Bayesian reconstruction, what the paper's Methods text describes.
+    decoder: str = "pv"
+    bayes_prior: str = "uniform"            # or "occupancy": P(x) from time spent at x
+    bayes_min_rate_hz: float = 1e-3         # rate floor, so log(f) is finite in empty bins
+
     pv_smooth_bins: float = 1.0             # a raw 10 ms bin is mostly zeros
     centroid_percentile: float = 99.0       # which positions enter the decoded average
     centroid_radius_cm: float = 10.0
     decoded_smooth_bins: float = 1.0        # 0.8 for entorhinal cortex
+
+    # `processDec` takes a weighted mean and never clips, so an anti-correlated position near
+    # the peak keeps its negative weight. Clipping is ours, off by default; no-op for "bayes".
+    clip_negative_weights: bool = False
 
     # -- the anchor, a.k.a. lowpass trajectory (runPvPosDecoding.m) -------------
     anchor_n_bins: int = 4                  # first 40 ms of a cycle, before the sweep departs
@@ -123,7 +134,10 @@ class Config:
     shuffle_percentile: float = 99.0
     min_active_cells: int = 1
     max_lowpass_error_cm: float = 50.0      # beyond this the decoder has lost the animal
-    min_peak_correlation: float | None = 0.0  # None -> compare against the shuffled null
+    # A floor on the decoder's peak score. None -> compare against the shuffled null
+    # instead. Ignored by decoder="bayes": a fixed floor is meaningless for a posterior
+    # probability, so Bayesian decoding always uses the shuffled null.
+    min_peak_correlation: float | None = 0.0
 
     # -- sweep extraction (chunkThetaPosSweeps.m) -------------------------------
     jump_max_cm: float = 20.0
@@ -132,11 +146,15 @@ class Config:
     straightness_min: float = 0.5
     speed_sweep_cm_s: float = 15.0          # SweepsSettings.m: minSpeed = 0.15 m/s
 
-    # A sweep departs from the animal, so its near end must be somewhere near the animal.
-    # Not in the paper: their decoder is accurate enough that this never binds. Here it
-    # rejects "sweeps" made of decoded positions that drift around the far side of the
-    # maze, never touching the animal at all. Set very large to switch it off.
-    max_sweep_origin_cm: float = 30.0
+    # A sweep should start near the animal. Ours, off by default (fig1.m gates on speed,
+    # nvalid > 3 and straight > 0.5, nothing else). On, it rejects "sweeps" whose decoded
+    # positions drift across the maze and never reach the animal. Set e.g. 30.0 to switch on.
+    max_sweep_origin_cm: float = float("inf")
+
+    # A sweep should point ahead of the animal, within this angle of the head direction; more
+    # than that is a backward sweep. Ours (chunkThetaPosSweeps.m never checks this), off by
+    # default. Set 90.0 to drop backward sweeps, whose left/right label is otherwise noise.
+    max_sweep_head_angle_deg: float | None = None
 
     def px(self, cm: float) -> float:
         """Convert centimetres to pixels."""

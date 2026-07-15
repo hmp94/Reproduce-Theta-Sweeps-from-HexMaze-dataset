@@ -3,24 +3,24 @@
     load_session -> theta_cycles -> rate_maps -> decode
     -> lowpass_trajectory -> extract_sweeps -> alternation
 
-`main` is a loop over `run` plus table formatting. Both preflights (LFP sampling rate, DLC
-head direction) run first and print their own tables, so their warnings never interleave
-with the results.
+`main` is a loop over `run` plus table formatting. The LFP sampling-rate preflight runs
+first and prints its own table, so its warnings never interleave with the results.
 """
 from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 
 from .config import (Config, PAPER_ALTERNATION_PCT, PAPER_ALTERNATION_SHUFFLE_PCT,
                      PAPER_PREVALENCE, PAPER_SWEEP_LENGTH_CM, SEGMENT_CM, _elapsed, status)
-from .data import (HeadDirectionCheck, LfpRate, Result, check_head_direction,
-                   check_lfp_rates, load_session, print_head_direction_check,
-                   print_lfp_check)
-from .decoding import decode, lowpass_trajectory, rate_maps, shuffle_threshold, theta_cycles
+from .data import LfpRate, Result, check_lfp_rates, load_session, print_lfp_check
+from .decoding import (cross_validate_smoothing, decode, lowpass_trajectory,
+                       prepare_log_prior, prepare_tuning, rate_maps, shuffle_threshold,
+                       theta_cycles)
 from .plotting import plot_sweeps
 from .sweeps import alternation, extract_sweeps
 
@@ -46,22 +46,34 @@ def run(nwb_path, node_csv_path, config: Config | None = None, verbose=True,
         stage("theta cycles")
         cycle_onsets = theta_cycles(session, config)
 
+        # The paper picks the rate-map smoothing width by cross-validation. Off unless asked,
+        # because it re-decodes the session once per candidate per fold.
+        cv_errors_cm = None
+        if config.cv_smoothing:
+            stage("cv smoothing")
+            best_cm, cv_errors_cm = cross_validate_smoothing(session, config,
+                                                             on_progress=on_progress)
+            config = replace(config, rate_smooth_cm=best_cm)
+
         stage("rate maps")
-        tuning_curves, bin_center_x_px, bin_center_y_px = rate_maps(session, config)
+        tuning_hz, bin_center_x_px, bin_center_y_px, occupancy_s = rate_maps(session, config)
+        tuning = prepare_tuning(tuning_hz, config)
+        log_prior = prepare_log_prior(occupancy_s, config)
 
         stage("shuffle threshold")
-        shuffle_99 = shuffle_threshold(session, config, tuning_curves)
+        shuffle_99 = shuffle_threshold(session, config, tuning, log_prior)
 
-        decoded_xy_px, peak_correlation = decode(session, config, tuning_curves,
-                                                 bin_center_x_px, bin_center_y_px,
-                                                 on_progress=on_progress)
+        decoded_xy_px, peak_score = decode(session, config, tuning,
+                                           bin_center_x_px, bin_center_y_px, log_prior,
+                                           on_progress=on_progress)
 
         stage("anchor")
-        lowpass_xy_px = lowpass_trajectory(session, config, tuning_curves,
-                                           bin_center_x_px, bin_center_y_px, cycle_onsets)
+        lowpass_xy_px = lowpass_trajectory(session, config, tuning,
+                                           bin_center_x_px, bin_center_y_px, cycle_onsets,
+                                           log_prior)
 
         stage("sweeps")
-        sweeps = extract_sweeps(session, config, decoded_xy_px, peak_correlation,
+        sweeps = extract_sweeps(session, config, decoded_xy_px, peak_score,
                                 lowpass_xy_px, cycle_onsets, shuffle_99)
 
         stage("alternation")
@@ -81,10 +93,12 @@ def run(nwb_path, node_csv_path, config: Config | None = None, verbose=True,
                      alternation=observed,
                      alternation_null=null_mean,
                      alternation_null_high=null_high,
-                     n_triplets=n_triplets)
+                     n_triplets=n_triplets,
+                     rate_smooth_cm=config.rate_smooth_cm,
+                     cv_errors_cm=cv_errors_cm)
 
         if verbose:
-            _print_session_summary(config, session, tuning_curves, stats)
+            _print_session_summary(config, session, tuning, stats)
 
         return Result(session, config, sweeps, stats, decoded_xy_px, lowpass_xy_px, cycle_onsets)
     finally:
@@ -97,6 +111,11 @@ def _print_session_summary(config, session, tuning_curves, stats):
           f"{session.n_units} units | {stats['n_cycles']} theta cycles")
     print(f"shuffle threshold {stats['shuffle_99']:.4f} | "
           f"{tuning_curves.shape[0]} visited position bins")
+
+    if stats.get("cv_errors_cm"):
+        curve = "  ".join(f"{s:g}cm:{e:.1f}" for s, e in stats["cv_errors_cm"].items())
+        print(f"CV smoothing (median decode error): {curve}")
+        print(f"  -> chose rate_smooth_cm = {stats['rate_smooth_cm']:g} cm")
     print(f"sweeps {stats['n_sweeps']} / {stats['n_running']} running cycles "
           f"= prevalence {stats['prevalence']:.3f}   (paper: {PAPER_PREVALENCE})")
 
@@ -152,13 +171,24 @@ def _build_parser(here: str):
                         help="multi-unit clusters are OFF by default")
     parser.add_argument("--cell-types", default="pyramidal", choices=["pyramidal", "all"])
 
+    parser.add_argument("--decoder", default=Config.decoder, choices=["pv", "bayes"],
+                        help="'pv' is the population-vector correlation the authors' code "
+                             "runs; 'bayes' is the Poisson reconstruction their Methods "
+                             "text describes")
+    parser.add_argument("--bayes-prior", default=Config.bayes_prior,
+                        choices=["uniform", "occupancy"],
+                        help="P(x) for --decoder bayes")
+    parser.add_argument("--clip-negative-weights", action="store_true",
+                        help="clip negative weights out of the decoded centroid; processDec "
+                             "does not, so this is off by default")
+
     parser.add_argument("--theta", default="lfp", choices=["lfp", "pca"],
                         help="where theta comes from; 'pca' reproduces the paper exactly")
     parser.add_argument("--head-direction", default="travel",
-                        choices=["travel", "dlc", "auto"],
-                        help="'travel' uses direction of motion; 'dlc' forces two DLC body "
-                             "parts even if they fail the check; 'auto' uses DLC only where "
-                             "it passes the check and travel elsewhere")
+                        choices=["travel", "dlc"],
+                        help="'travel' uses direction of motion; 'dlc' reads the head axis "
+                             "from two DLC body parts, which are noisy on this dataset "
+                             "(docs/data-issues.md)")
     parser.add_argument("--dlc-parts", nargs=2, default=list(Config.dlc_head_parts),
                         metavar=("FRONT", "BACK"),
                         help="which DLC body parts define the head axis")
@@ -169,7 +199,12 @@ def _build_parser(here: str):
                         help="how far past the visited area the decoder may place the "
                              "animal, so a sweep can leave the travelled path")
     parser.add_argument("--spatial-bin-cm", type=float, default=Config.spatial_bin_cm)
-    parser.add_argument("--rate-smooth-cm", type=float, default=Config.rate_smooth_cm)
+    parser.add_argument("--rate-smooth-cm", type=float, default=Config.rate_smooth_cm,
+                        help="fixed rate-map smoothing width; ignored when --cv-smoothing is set")
+    parser.add_argument("--cv-smoothing", action="store_true",
+                        help="pick the rate-map smoothing width per session by 10-fold "
+                             "cross-validation (the paper's method), overriding "
+                             "--rate-smooth-cm. Slow: re-decodes each session per candidate.")
     parser.add_argument("--speed-smooth-s", type=float, default=Config.speed_smooth_s,
                         help="Gaussian width used to smooth the speed estimate")
     parser.add_argument("--speed-despike-cm-s", type=float, default=None,
@@ -191,11 +226,15 @@ def _config_kwargs_from_args(args) -> dict:
     kwargs.update(
         px_per_cm=args.px_per_cm,
         theta_source=args.theta,
+        decoder=args.decoder,
+        bayes_prior=args.bayes_prior,
+        clip_negative_weights=args.clip_negative_weights,
         max_sweep_origin_cm=args.max_sweep_origin_cm,
         unvisited_margin_cm=args.unvisited_margin_cm,
         dlc_head_parts=tuple(args.dlc_parts),
         spatial_bin_cm=args.spatial_bin_cm,
         rate_smooth_cm=args.rate_smooth_cm,
+        cv_smoothing=args.cv_smoothing,
         speed_smooth_s=args.speed_smooth_s,
         speed_despike_cm_s=args.speed_despike_cm_s,
         quality=("good", "mua") if args.quality == "good+mua" else ("good",),
@@ -257,31 +296,17 @@ def main(argv=None):
         print_lfp_check(lfp_records)
         print()
 
-    # --- pre-flight: is the DLC head direction believable? ---------------------
-    head_direction_records: dict[str, HeadDirectionCheck] = {}
-    if args.head_direction in ("dlc", "auto"):
-        head_direction_records = check_head_direction(nwb_files, Config(**config_kwargs))
-        n_unusable = print_head_direction_check(head_direction_records)
-
-        # Say what the run will actually do about it, so the check cannot look like a
-        # decision it did not make.
-        if n_unusable and args.head_direction == "dlc":
-            print("--head-direction dlc: using DLC anyway. Pass --head-direction auto to "
-                  "use the direction of travel wherever the check fails.")
-        elif n_unusable:
-            print(f"--head-direction auto: {n_unusable} session(s) will use the direction "
-                  f"of travel instead.")
-        print()
-
     # --- the results table -----------------------------------------------------
-    print(f"branch={args.branch}  px/cm={args.px_per_cm:.4f}  theta={args.theta}  "
-          f"head_dir={args.head_direction}  "
+    decoder_label = (f"bayes/{args.bayes_prior}" if args.decoder == "bayes" else "pv")
+    print(f"branch={args.branch}  px/cm={args.px_per_cm:.4f}  decoder={decoder_label}  "
+          f"theta={args.theta}  head_dir={args.head_direction}  "
           f"units={args.quality}/{args.cell_types}  speed_sigma={args.speed_smooth_s}s  "
+          f"origin_gate={args.max_sweep_origin_cm}cm  "
           f"({len(nwb_files)} session(s))\n")
     print(RESULTS_COLUMNS)
     print("-" * len(RESULTS_COLUMNS))
 
-    rows, fell_back = [], []
+    rows = []
     started_all = time.time()
 
     for index, nwb_file in enumerate(nwb_files, 1):
@@ -292,19 +317,9 @@ def main(argv=None):
         if name in lfp_records:
             session_kwargs["lfp_rate_hz"] = lfp_records[name].rate_hz
 
-        # Decide this session's head direction. "dlc" forces DLC; "auto" uses it only where
-        # the preflight passed it. Either way a file with no DLC at all uses travel rather
-        # than failing. The `hd` column records what each row actually used.
-        record = head_direction_records.get(name)
+        # The `hd` column records what each row used. A file with no DLC_Position fails
+        # loudly under --head-direction dlc rather than quietly using travel instead.
         head_direction = args.head_direction
-
-        if record is None or not record.has_dlc:
-            head_direction = "travel"
-        elif args.head_direction == "auto":
-            head_direction = "dlc" if record.usable else "travel"
-
-        if args.head_direction != "travel" and head_direction == "travel":
-            fell_back.append(name)
         session_kwargs["head_direction_source"] = head_direction
 
         def show(stage, name=name, index=index, started=started):
@@ -330,8 +345,14 @@ def main(argv=None):
         status()
         print(_format_results_row(name, result.stats, head_direction), flush=True)
 
+        if result.stats.get("cv_errors_cm"):
+            curve = "  ".join(f"{s:g}:{e:.0f}" for s, e in result.stats["cv_errors_cm"].items())
+            print(f"    cv smoothing (sigma_cm:median_err_cm)  {curve}"
+                  f"   -> {result.stats['rate_smooth_cm']:g} cm", flush=True)
+
+        skip = ("shuffle_99", "cv_errors_cm")           # the dict does not belong in a CSV
         rows.append(dict(session=name, head_direction=head_direction,
-                         **{k: v for k, v in result.stats.items() if k != "shuffle_99"}))
+                         **{k: v for k, v in result.stats.items() if k not in skip}))
 
     if not rows:
         return 1
@@ -348,10 +369,6 @@ def main(argv=None):
           f"{table.n_triplets.sum():>6}")
 
     print(f"\n{len(rows)} session(s) in {_elapsed(started_all)}")
-
-    if fell_back:
-        print(f"\n{len(fell_back)} session(s) used the direction of travel instead of DLC: "
-              f"{', '.join(fell_back)}")
 
     if args.plot:
         print(f"\nwrote {len(rows)} figures to {args.plot}/")
