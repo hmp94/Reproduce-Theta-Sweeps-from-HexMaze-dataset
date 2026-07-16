@@ -9,10 +9,10 @@ The authors' MATLAB works in **metres**, so every threshold is checkable. Defaul
 paper-faithful; `Config` fields marked **ours** are additions or data-forced re-scalings
 ([divergences](divergences.md)).
 
-The steps below describe the configuration the current analysis uses: the **Bayesian (Poisson)**
-decoder with ~50 ms spike smoothing (`decoder="bayes"`). The authors' released code uses a
-**PV-correlation** decoder instead (`decoder="pv"`), which remains available and is the code default;
-both feed the identical downstream stages.
+The steps below describe the **Bayesian (Poisson)** decoder with ~50 ms spike smoothing
+(`decoder="bayes"`), which the current analysis uses. The authors' released code uses a
+**PV-correlation** decoder instead (`decoder="pv"`), which remains available and is the code default.
+Both feed the identical downstream stages.
 
 ## Processing steps
 
@@ -37,7 +37,7 @@ both feed the identical downstream stages.
 - **Phase (paper's method):** Butterworth-filtered spike counts → PCA → phase = angle of the PC1–PC2
   projection (`--theta pca`). On our ~16× smaller populations too few cells fire per cycle to trace a
   stable PC1–PC2 rotation, so the recovered rhythm collapses to **~0.9 Hz** — outside the theta band
-  (LFP recovers 7.9 Hz) — and does so silently, which is why LFP is the default here.
+  (LFP recovers 7.9 Hz) — and does so silently, so LFP is the default here.
 - **Cycle boundaries:** phase zero is fixed at the theta trough (the population firing minimum), so
   each cycle starts there; a cycle is kept only if its period is **0.08–0.22 s** (≈ 4.5–12.5 Hz).
 
@@ -76,9 +76,9 @@ $$r^2 \;=\; 1 - \frac{\mathrm{Var}(e)}{\mathrm{Var}(x) + \mathrm{Var}(y)}$$
   1000× shuffle; zero triplets → undefined, not zero). - mainly use for testing features
 
 ### 6. Plotting
-- `plot_sweeps` — Fig. 4a/d style: maze + animal path/position (optional rat marker), each accepted
-  sweep as purple blobs, light (start, at the animal) → violet (far end). `plot_all_sweeps` tiles many
-  windows into a montage.
+- `plot_sweeps` — Fig. 4a/d style, showing the maze and animal path/position (optional rat marker)
+  with each accepted sweep as purple blobs, light (start, at the animal) → violet (far end).
+  `plot_all_sweeps` tiles many windows into a montage.
 
 ## Parameters and their source
 
