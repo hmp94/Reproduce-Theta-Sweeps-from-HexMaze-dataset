@@ -5,25 +5,22 @@ entorhinal–hippocampal maps of space", *Nature* 639:995–1005**, run on our h
 recordings from a 9 × 5 m hex maze (10 NWB sessions).
 
 Ported from the authors' **released MATLAB**, not the Methods text — where the two disagree, the code
-wins ([docs/divergences.md](docs/divergences.md)). Every parameter and its source:
-[docs/methods.md](docs/methods.md).
+wins ([divergences](docs/divergences.md)). Every stage, parameter, and source: [methods](docs/methods.md).
 
-## Result
-
-**The analysis does not reproduce, and the reason is the data, not the port.**
+## Result — does not reproduce, and the reason is the data
 
 | | this dataset | Vollan et al. |
 |---|---|---|
 | cells / session | 42–83 good pyramidal | 769 mean |
-| sweep prevalence | ~0.001 (PV decoder) | 0.48 |
-| left–right alternation | undefined — 0 adjacent-cycle triplets | 79.8% vs 61.1% shuffled |
+| sweep prevalence | 0.001 (PV) · 0.01–0.05 (Bayes + 50 ms) | 0.48 |
+| left–right alternation | fails — **0 / 10** sessions clear the shuffle | 79.8 % vs 61.1 % shuffled |
 
-At 10 ms — the timescale a sweep needs — the population carries **no decodable position**: a
-cross-validated decoder sits at the chance error (~252 cm), and 19–52% of running 10 ms bins have
-**zero spikes from all cells**. The paper's effect rests on large MEC/parasubiculum ensembles; these
-are a single hippocampal probe. We also ran the Bayesian-decoder variant of a second lab (Tang et al.
-2026): sweep-like trajectories appear but the alternation still fails (0/10 sessions). Full evidence
-and every rescue tried: [docs/findings.md](docs/findings.md).
+At **10 ms** — the timescale a sweep needs — the population carries **no decodable position**: a
+cross-validated decoder sits at chance (~252 cm error), and **19–52 % of running bins hold zero spikes
+from every cell**. The paper's effect rests on large MEC/parasubiculum ensembles; this is a single
+hippocampal probe. The heavier-smoothed **Bayesian** variant (Tang et al. 2026) does surface sweep-like
+trajectories, but their L/R alternation still fails in every session. Full evidence and every rescue
+tried: [findings](docs/findings.md).
 
 ## Install & run
 
@@ -34,7 +31,7 @@ hexmaze-sweeps --plot figures -o results.csv        # every *.nwb in the working
 
 ```python
 from hexmaze_sweeps import Config, run, plot_sweeps
-result = run("Rat6_20260629.nwb", "node_list_new.csv", Config())
+result = run("Rat6_20260629.nwb", "node_list_new.csv", Config(decoder="bayes"))
 plot_sweeps(result, save_path="sweeps.png")
 ```
 
@@ -66,7 +63,7 @@ load_session → theta_cycles → rate_maps → decode
 
 ## Data defects — read before trusting numbers
 
-Full write-up: [docs/data-issues.md](docs/data-issues.md).
+Full write-up: [data-issues](docs/data-issues.md).
 
 | defect | status |
 |---|---|
