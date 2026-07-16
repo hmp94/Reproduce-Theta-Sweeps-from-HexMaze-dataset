@@ -1,13 +1,10 @@
 # Theta sweeps on the HexMaze dataset
 
-Python port of **Vollan, Gardner, Moser & Moser (2025), "Left–right-alternating theta sweeps in
-entorhinal–hippocampal maps of space", *Nature* 639:995–1005**, run on our hippocampal Neuropixels
+Reproducing **Vollan, Gardner, Moser & Moser (2025), "Left–right-alternating theta sweeps in
+entorhinal–hippocampal maps of space", *Nature* 639:995–1005** using python, run on our hippocampal Neuropixels
 recordings from a 9 × 5 m hex maze (10 NWB sessions).
 
-Ported from the authors' **released MATLAB**, not the Methods text — where the two disagree, the code
-wins ([divergences](docs/divergences.md)). Every stage, parameter, and source: [methods](docs/methods.md).
-
-## Result — does not reproduce, and the reason is the data
+## Result 
 
 | | this dataset | Vollan et al. |
 |---|---|---|
@@ -15,7 +12,7 @@ wins ([divergences](docs/divergences.md)). Every stage, parameter, and source: [
 | sweep prevalence | 0.001 (PV) · 0.01–0.05 (Bayes + 50 ms) | 0.48 |
 | left–right alternation | fails — **0 / 10** sessions clear the shuffle | 79.8 % vs 61.1 % shuffled |
 
-At **10 ms** — the timescale a sweep needs — the population carries **no decodable position**: a
+At **10 ms** (paper's parameter) the timescale a sweep needs — the population carries **no decodable position**: a
 cross-validated decoder sits at chance (~252 cm error), and **19–52 % of running bins hold zero spikes
 from every cell**. The paper's effect rests on large MEC/parasubiculum ensembles; this is a single
 hippocampal probe. The heavier-smoothed **Bayesian** variant (Tang et al. 2026) does surface sweep-like
