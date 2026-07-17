@@ -6,11 +6,11 @@ Two decoders, because the paper's Methods text and the paper's released code do 
 about which one it used. `Config.decoder` picks:
 
 * "pv"    -- the authors' population-vector correlation (`decodePv.m`), which is what their
-             code actually runs: for each time bin, correlate the population's activity
-             ACROSS CELLS against its average activity at each maze position;
-* "bayes" -- Poisson rate-map reconstruction, which is what their Methods text describes.
+             methods do: for each time bin, correlate the population's activity
+             across cells against its average activity at each maze position;
+* "bayes" -- Poisson rate-map reconstruction, suggested by Sachi.
 
-They differ only in how the (n_time_bins, n_positions) score matrix is produced.
+They differ  in how the (n_time_bins, n_positions) score matrix is produced.
 `prepare_tuning` feeds each the form it needs -- and they need different forms, so do not
 cross the wires. Everything downstream just wants the score to be higher where the position
 fits better, so it is shared: a thresholded centre of mass (`processDec`) rather than the
@@ -34,15 +34,18 @@ from .data import Session
 # Theta cycles
 # =============================================================================
 def _theta_phase_from_lfp(session: Session, config: Config) -> np.ndarray:
+    
     """Theta phase per time bin, band-passed from the field potential."""
+    
     nyquist_hz = session.lfp_rate_hz / 2
     filter_b, filter_a = butter(2, [config.theta_band_hz[0] / nyquist_hz,
-                                    config.theta_band_hz[1] / nyquist_hz], "band")
-    lfp_phase = np.angle(hilbert(filtfilt(filter_b, filter_a, session.lfp_theta_channel)))
-    lfp_t_s = np.arange(len(lfp_phase)) / session.lfp_rate_hz
+                                    config.theta_band_hz[1] / nyquist_hz], "band") # 5-10 Hz
+    lfp_phase = np.angle(hilbert(filtfilt(filter_b, filter_a, session.lfp_theta_channel))) #instaneous phase
+    lfp_t_s = np.arange(len(lfp_phase)) / session.lfp_rate_hz # cycles extracted
 
     # np.interp repeats its last value rather than extrapolating, which would freeze
     # the phase and destroy every cycle past the end of the LFP. Refuse instead.
+    
     coverage = lfp_t_s[-1] / session.bin_centers_s[-1]
     if coverage < 0.95:
         raise ValueError(
@@ -100,7 +103,7 @@ def theta_cycles(session: Session, config: Config) -> np.ndarray:
         population_spikes[phase_bin == k].mean() if np.any(phase_bin == k) else np.inf
         for k in range(n_phase_bins)])
 
-    quietest_bin = np.argmin(mean_rate_per_phase_bin)
+    quietest_bin = np.argmin(mean_rate_per_phase_bin) # min fire
     min_firing_phase = (quietest_bin + 0.5) / n_phase_bins * 2 * np.pi - np.pi 
     phase = (phase - min_firing_phase + np.pi) % (2 * np.pi) - np.pi # revert
 
@@ -119,9 +122,7 @@ def theta_cycles(session: Session, config: Config) -> np.ndarray:
 def rate_maps(session: Session, config: Config, include_bins: np.ndarray | None = None):
     """Build the tuning curves the decoder compares against.
 
-    Rates are returned in spikes per second, NOT yet in the form either decoder wants --
-    `prepare_tuning` does that, because the two want different things (the PV decoder
-    mean-normalises each cell; the Bayesian one needs the rates themselves).
+    Rates are returned in spikes per second then fed to `prepare_tuning` 
 
     Args:
         include_bins: optional boolean mask over time bins. When given, only those bins

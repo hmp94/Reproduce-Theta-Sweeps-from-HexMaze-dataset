@@ -4,16 +4,16 @@
 load_session → theta_cycles → rate_maps → decode → lowpass_trajectory → extract_sweeps → alternation → plot
 ```
 
-Defaults are paper-faithful; `Config` fields marked **ours** are additions or data-forced re-scalings
-([divergences](divergences.md)). The steps use the **Bayesian (Poisson)** decoder with ~50 ms smoothing
+`Config` fields marked **ours** are additions or data-forced re-scalings.
+The steps use the **Bayesian (Poisson)** decoder with ~50 ms smoothing
 (`decoder="bayes"`); the released code's **PV correlation** (`decoder="pv"`) is the alternative default.
 Both feed the same downstream stages.
 
 ### 1. Preprocessing
 - Curated units (`good` pyramidal; MUA/interneurons off). 10 ms bins; tracking on the same grid; sweep
   run-gate > 15 cm/s.
-- `px_per_cm = 1.2435` (from node spacing). Head direction from travel (DLC unusable,
-  [data-issues §2](data-issues.md)); LFP rate inferred around corrupt timestamps ([§1](data-issues.md)).
+- `px_per_cm = 1.2435` (from node spacing). Head direction from travel (DLC unusable); LFP rate inferred
+  around corrupt timestamps ([data-issues](data-issues.md)).
 
 ### 2. Rate maps
 - Arena at 5 cm; movement gate > 5 cm/s; drop bins < 0.25 s occupancy; Gaussian σ = 7.5 cm (paper 2.5 cm).

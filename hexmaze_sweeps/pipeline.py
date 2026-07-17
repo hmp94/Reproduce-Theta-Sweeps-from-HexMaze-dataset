@@ -181,6 +181,9 @@ def _build_parser(here: str):
     parser.add_argument("--clip-negative-weights", action="store_true",
                         help="clip negative weights out of the decoded centroid; processDec "
                              "does not, so this is off by default")
+    parser.add_argument("--spike-smooth-bins", type=float, default=Config.pv_smooth_bins,
+                        help="Gaussian smoothing of the spike-count matrix before decoding, in "
+                             "10 ms bins (1 = 10 ms; 5 = 50 ms, the Tang et al. Bayesian setting)")
 
     parser.add_argument("--theta", default="lfp", choices=["lfp", "pca"],
                         help="where theta comes from; 'pca' reproduces the paper exactly")
@@ -229,6 +232,7 @@ def _config_kwargs_from_args(args) -> dict:
         decoder=args.decoder,
         bayes_prior=args.bayes_prior,
         clip_negative_weights=args.clip_negative_weights,
+        pv_smooth_bins=args.spike_smooth_bins,
         max_sweep_origin_cm=args.max_sweep_origin_cm,
         unvisited_margin_cm=args.unvisited_margin_cm,
         dlc_head_parts=tuple(args.dlc_parts),
@@ -384,3 +388,7 @@ def main(argv=None):
         table.to_csv(args.out, index=False)
         print(f"\nwrote {args.out}")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

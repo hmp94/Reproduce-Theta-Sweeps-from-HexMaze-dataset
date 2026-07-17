@@ -61,7 +61,7 @@ def _elapsed(since: float) -> str:
 class Config:
     """Every tunable number. Values are the authors' unless a comment says otherwise."""
 
-    # -- physical scale: the only place centimetres enter the computation ------
+    # -- scaling factors ------
     px_per_cm: float = 1.2435
 
     # -- time base (SweepsSettings.m: dt = 10e-3) ------------------------------
@@ -74,10 +74,9 @@ class Config:
     cycle_min_s: float = 0.08           # 0.08-0.22 s = 4.5-12.5 Hz; anything else is not theta
     cycle_max_s: float = 0.22
 
-    # -- which cells to use ----------------------------------------------------
-    # Multi-unit clusters are off: they double the sweep count, but the extra sweeps
-    # are longer than the paper's and the rate maps become far less reproducible
-    # between halves of the session (r = 0.35 -> r = 0.16).
+    # -- choosing cell types ----------------------------------------------------
+    # Multi-unit clusters are off
+ 
     quality: tuple = ("good",)              # ("good", "mua") to include MUA
     cell_types: tuple = ("pyramidal",)      # None to also keep interneurons
 
@@ -85,7 +84,7 @@ class Config:
     speed_smooth_s: float = 1.0             # SweepsSettings.m: tsm.speed = 100 samples
     speed_despike_cm_s: float | None = None  # e.g. 150.0 to drop tracking jumps; not in the paper
     head_dir_smooth_s: float = 0.10
-    head_direction_source: str = "travel"   # "dlc" reads two body parts from DLC_Position
+    head_direction_source: str = "dlcl"   # "dlc" reads two body parts from DLC_Position
     dlc_head_parts: tuple = ("nose", "neck")  # (front, back); the angle runs back -> front
 
     # -- rate maps (runPvPosDecoding.m) -----------------------------------------
@@ -97,19 +96,16 @@ class Config:
     # The paper picks the smoothing width by cross-validation, not a fixed value (Methods
     # step 1). `--cv-smoothing` does this per session; off by default because it is slow.
     cv_smoothing: bool = False
-    cv_smoothing_candidates_cm: tuple = (2.5, 5.0, 7.5, 10.0, 12.5, 15.0)
+    cv_smoothing_candidates_cm: tuple = (2.5, 5.0, 7.5, 10.0, 12.5, 15.0, 50.0)
     cv_folds: int = 10                      # the paper's 10-fold
 
-    # How far past the visited area a sweep may be decoded. Their state space is the whole
-    # rectangle, which in a 1.5 m open field IS the environment; a 9 x 5 m hex maze is 92%
-    # wall, so we dilate the visited bins instead. Default = 3 sigma of the rate-map
-    # smoothing, the decoder's reach limit (past it no tuning is carried). 0 = visited only.
+
     unvisited_margin_cm: float = 22.5       # = 3 * rate_smooth_cm
 
     # -- decoder (decodePv.m, processDec) ---------------------------------------
-    # "pv"    -- population-vector correlation across cells (decodePv.m), what the authors'
-    #            released code actually runs.
-    # "bayes" -- Poisson Bayesian reconstruction, what the paper's Methods text describes.
+    # "pv"    -- population-vector correlation across cells (decodePv.m), original authors'
+    #            method
+    # "bayes" -- Poisson Bayesian reconstruction.
     decoder: str = "pv"
     bayes_prior: str = "uniform"            # or "occupancy": P(x) from time spent at x
     bayes_min_rate_hz: float = 1e-3         # rate floor, so log(f) is finite in empty bins
@@ -146,14 +142,8 @@ class Config:
     straightness_min: float = 0.5
     speed_sweep_cm_s: float = 15.0          # SweepsSettings.m: minSpeed = 0.15 m/s
 
-    # A sweep should start near the animal. Ours, off by default (fig1.m gates on speed,
-    # nvalid > 3 and straight > 0.5, nothing else). On, it rejects "sweeps" whose decoded
-    # positions drift across the maze and never reach the animal. Set e.g. 30.0 to switch on.
+    # This to maintain the sweep orginate from the animal sweep forward
     max_sweep_origin_cm: float = float("inf")
-
-    # A sweep should point ahead of the animal, within this angle of the head direction; more
-    # than that is a backward sweep. Ours (chunkThetaPosSweeps.m never checks this), off by
-    # default. Set 90.0 to drop backward sweeps, whose left/right label is otherwise noise.
     max_sweep_head_angle_deg: float | None = None
 
     def px(self, cm: float) -> float:
