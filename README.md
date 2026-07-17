@@ -42,6 +42,13 @@ Key flags (defaults are paper-faithful):
 | `--head-direction travel\|dlc` | heading from motion, or from DLC (noisy here) |
 | `--quality good\|good+mua` | multi-unit clusters off by default |
 
+## Interactive walkthrough
+
+[`notebooks/pipeline_walkthrough.ipynb`](notebooks/pipeline_walkthrough.ipynb) runs the pipeline one stage
+at a time. Every function is defined inline and editable, with a plain-language explanation and a plot per
+stage. It is the quickest way to follow the flow, read what each function does, and try a parameter or edit
+a function without touching the package.
+
 ## Pipeline & layout
 
 ```
