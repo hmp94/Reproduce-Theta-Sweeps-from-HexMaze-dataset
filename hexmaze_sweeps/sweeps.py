@@ -126,6 +126,82 @@ def _smoothness_breaks(decoded, config):
     return step_to_next_px, step_from_prev_px, is_sharp_turn
 
 
+def _tang_sweep(sweeps, cycle, path, is_finite, cycle_bins, cycle_start,
+                lowpass_smoothed, session, config,
+                step_to_next_px, is_sharp_turn, jump_max_px) -> None:
+    """One cycle's sweep by the Tang et al. 2026 definition.
+
+    The candidate is the LONGEST smooth stretch of consecutive valid bins, truncated
+    to the sub-segment with the greatest net start-to-end displacement. The sweep
+    vector runs from the lowpass decoded position at the CYCLE START to the
+    stretch's most distal point; direction and length are its angle and magnitude.
+    """
+    n = len(cycle_bins)
+
+    # --- maximal smooth runs of consecutive valid bins ------------------------
+    runs = []
+    k = 0
+    while k < n:
+        if not is_finite[k]:
+            k += 1
+            continue
+        j = k
+        while (j + 1 < n and is_finite[j + 1]
+               and step_to_next_px[cycle_bins[j]] <= jump_max_px
+               and not is_sharp_turn[cycle_bins[j + 1]]):
+            j += 1
+        runs.append((k, j))
+        k = j + 1
+    if not runs:
+        return
+
+    run_start, run_stop = max(runs, key=lambda r: r[1] - r[0])
+
+    # --- truncate to the sub-segment with the largest net displacement --------
+    best_i, best_j, best_net = run_start, run_stop, -1.0
+    for i in range(run_start, run_stop + 1):
+        for j in range(i + 1, run_stop + 1):
+            net = np.hypot(*(path[j] - path[i]))
+            if net > best_net:
+                best_i, best_j, best_net = i, j, net
+    if best_net <= 0:
+        return
+
+    # --- the sweep vector: cycle-start anchor -> most distal point ------------
+    anchor0 = lowpass_smoothed[cycle_start]
+    if not np.isfinite(anchor0).all():
+        return
+    segment = path[best_i:best_j + 1]
+    from_anchor = np.hypot(segment[:, 0] - anchor0[0], segment[:, 1] - anchor0[1])
+    distal = int(np.argmax(from_anchor))
+    near = int(np.argmin(from_anchor))
+    sweep_vector_px = segment[distal] - anchor0
+    if np.hypot(*sweep_vector_px) < 1e-9:
+        return
+
+    sweeps["n_valid_samples"][cycle] = best_j - best_i + 1
+    sweeps["length_px"][cycle] = np.hypot(*sweep_vector_px)
+    sweeps["direction"][cycle] = np.arctan2(sweep_vector_px[1], sweep_vector_px[0])
+    sweeps["path_xy_px"][cycle] = segment
+    sweeps["path_frame_px"][cycle] = segment - anchor0
+    sweeps["start_bin"][cycle] = cycle_start + best_i
+    sweeps["stop_bin"][cycle] = cycle_start + best_j
+    sweeps["true_xy_px"][cycle] = (session.track_x_px[cycle_start + best_i],
+                                   session.track_y_px[cycle_start + best_i])
+    sweeps["origin_error_px"][cycle] = np.hypot(
+        *(segment[near] - sweeps["true_xy_px"][cycle]))
+
+    # r^2 against the sweep vector's axis, the distal point excluded because it
+    # defines the axis (same convention as the vollan branch).
+    body = np.delete(segment, distal, axis=0) - anchor0
+    if len(body) < 2:
+        return
+    axis = sweep_vector_px / np.hypot(*sweep_vector_px)
+    total_variance = body[:, 0].var() + body[:, 1].var()
+    if total_variance > 0:
+        sweeps["straightness"][cycle] = (body @ axis).var() / total_variance
+
+
 def extract_sweeps(session, config, decoded_xy_px, peak_correlation,
                    lowpass_xy_px, cycle_onsets, shuffle_99) -> dict:
     """Pull one candidate sweep out of each theta cycle.
@@ -191,6 +267,12 @@ def extract_sweeps(session, config, decoded_xy_px, peak_correlation,
         path_frame = sweep_frame[cycle_bins]
         is_finite = np.isfinite(path[:, 0])
         if not is_finite.any():
+            continue
+
+        if config.sweep_convention == "tang":
+            _tang_sweep(sweeps, cycle, path, is_finite, cycle_bins, cycle_start,
+                        lowpass_smoothed, session, config,
+                        step_to_next_px, is_sharp_turn, jump_max_px)
             continue
 
         # --- the smooth stretch containing the peak of population firing --------

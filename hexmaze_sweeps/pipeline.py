@@ -187,6 +187,14 @@ def _build_parser(here: str):
 
     parser.add_argument("--theta", default="lfp", choices=["lfp", "pca"],
                         help="where theta comes from; 'pca' reproduces the paper exactly")
+    parser.add_argument("--lfp-npy", default=None, metavar="PATH",
+                        help="externally exported LFP -- a (n_samples, n_channels) .npy "
+                             "or the directory holding *_lfp_data.npy; replaces the "
+                             "NWB's own LFP (use when that one is broken)")
+    parser.add_argument("--lfp-npy-fs", type=float, default=1500.0)
+    parser.add_argument("--lfp-channel", type=int, default=None,
+                        help="channel index into --lfp-npy; default picks the highest "
+                             "theta/delta power ratio")
     parser.add_argument("--head-direction", default="travel",
                         choices=["travel", "dlc"],
                         help="'travel' uses direction of motion; 'dlc' reads the head axis "
@@ -195,6 +203,11 @@ def _build_parser(here: str):
     parser.add_argument("--dlc-parts", nargs=2, default=list(Config.dlc_head_parts),
                         metavar=("FRONT", "BACK"),
                         help="which DLC body parts define the head axis")
+    parser.add_argument("--sweep-convention", default=Config.sweep_convention,
+                        choices=["tang", "vollan"],
+                        help="'tang' (Tang et al. 2026): longest smooth stretch, "
+                             "sweep vector from the cycle-start anchor; 'vollan': "
+                             "the original chunkThetaPosSweeps.m definition")
     parser.add_argument("--max-sweep-origin-cm", type=float, default=Config.max_sweep_origin_cm,
                         help="a sweep's near end must be this close to the animal; use a "
                              "huge value to switch the criterion off")
@@ -229,11 +242,15 @@ def _config_kwargs_from_args(args) -> dict:
     kwargs.update(
         px_per_cm=args.px_per_cm,
         theta_source=args.theta,
+        external_lfp_npy=args.lfp_npy,
+        external_lfp_fs=args.lfp_npy_fs,
+        external_lfp_channel=args.lfp_channel,
         decoder=args.decoder,
         bayes_prior=args.bayes_prior,
         clip_negative_weights=args.clip_negative_weights,
         pv_smooth_bins=args.spike_smooth_bins,
         max_sweep_origin_cm=args.max_sweep_origin_cm,
+        sweep_convention=args.sweep_convention,
         unvisited_margin_cm=args.unvisited_margin_cm,
         dlc_head_parts=tuple(args.dlc_parts),
         spatial_bin_cm=args.spatial_bin_cm,
@@ -294,8 +311,9 @@ def main(argv=None):
         matplotlib.use("Agg")               # write files without needing a display
 
     # --- pre-flight: resolve every LFP rate first, so warnings stay out of the table
+    # (pointless when an external LFP replaces the NWB's own)
     lfp_records: dict[str, LfpRate] = {}
-    if not args.skip_lfp_check and args.theta == "lfp":
+    if not args.skip_lfp_check and args.theta == "lfp" and not args.lfp_npy:
         lfp_records = check_lfp_rates(nwb_files, Config(**config_kwargs))
         print_lfp_check(lfp_records)
         print()

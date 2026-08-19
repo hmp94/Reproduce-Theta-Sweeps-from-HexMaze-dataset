@@ -71,6 +71,13 @@ class Config:
     theta_band_hz: tuple = (5.0, 10.0)
     theta_source: str = "lfp"           # "pca" reconstructs theta from spiking, as the paper does
     lfp_rate_hz: float | None = None    # None -> work it out; see infer_lfp_rate_hz
+
+    # Some sessions carry a broken LFP inside the NWB but a good export next to it
+    # (LFP_Output/*_lfp_data.npy). Point here to that file or its directory and the
+    # NWB's own LFP is ignored. Channel None -> highest theta/delta power ratio.
+    external_lfp_npy: str | None = None
+    external_lfp_fs: float = 1500.0
+    external_lfp_channel: int | None = None
     cycle_min_s: float = 0.08           # 0.08-0.22 s = 4.5-12.5 Hz; anything else is not theta
     cycle_max_s: float = 0.22
 
@@ -136,6 +143,14 @@ class Config:
     min_peak_correlation: float | None = 0.0
 
     # -- sweep extraction (chunkThetaPosSweeps.m) -------------------------------
+    # "vollan": the smooth stretch containing the population-firing peak; sweep
+    #   vector measured against the per-bin lowpass anchor; length = max pairwise
+    #   distance (chunkThetaPosSweeps.m).
+    # "tang": Tang et al. 2026 (Nat Neurosci) -- the LONGEST smooth stretch,
+    #   truncated to maximize net start-to-end displacement; sweep vector runs
+    #   from the lowpass decoded position at the CYCLE START to the stretch's
+    #   most distal point; length = that vector's magnitude.
+    sweep_convention: str = "tang"
     jump_max_cm: float = 20.0
     turn_max_rad: float = np.pi / 2
     min_valid_samples: int = 4

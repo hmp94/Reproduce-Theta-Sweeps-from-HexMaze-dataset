@@ -1,0 +1,373 @@
+<title>HexMaze Sweep 复现手册</title>
+<style>
+  :root{
+    --bg:#fafbfc; --panel:#f1f4f6; --ink:#1c2226; --muted:#5c6a72;
+    --accent:#0d6b70; --accent-soft:#e3eeee; --line:#dce3e7;
+    --warn:#9a6200; --warn-bg:#faf3e3; --code-bg:#eef2f4; --code-ink:#24333a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#14181b; --panel:#1b2125; --ink:#dde3e7; --muted:#93a1a8;
+      --accent:#4cc3c9; --accent-soft:#173235; --line:#2a3237;
+      --warn:#e0a437; --warn-bg:#2a2316; --code-bg:#1d2429; --code-ink:#c6d2d8;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#14181b; --panel:#1b2125; --ink:#dde3e7; --muted:#93a1a8;
+    --accent:#4cc3c9; --accent-soft:#173235; --line:#2a3237;
+    --warn:#e0a437; --warn-bg:#2a2316; --code-bg:#1d2429; --code-ink:#c6d2d8;
+  }
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"Avenir Next","Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:15.5px; line-height:1.65; margin:0; padding:0 20px 90px;
+  }
+  main{max-width:880px; margin:0 auto;}
+  header{margin:56px 0 40px; border-bottom:2px solid var(--accent); padding-bottom:28px;}
+  h1{font-size:30px; font-weight:600; letter-spacing:-.01em; margin:0 0 10px; text-wrap:balance;}
+  .sub{color:var(--muted); font-size:15px; max-width:65ch;}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:18px; font-size:13px; color:var(--muted);
+        font-family:"SF Mono","Cascadia Code",Consolas,monospace;}
+  h2{font-size:20px; font-weight:600; margin:52px 0 14px; display:flex; align-items:baseline; gap:12px;}
+  h2 .no{color:var(--accent); font-family:"SF Mono","Cascadia Code",Consolas,monospace;
+         font-size:15px; font-weight:600;}
+  h3{font-size:16px; font-weight:600; margin:30px 0 8px;}
+  p{max-width:72ch; margin:10px 0;}
+  ul,ol{max-width:72ch; padding-left:22px;}
+  li{margin:4px 0;}
+  code{font-family:"SF Mono","Cascadia Code",Consolas,monospace; font-size:.86em;
+       background:var(--code-bg); color:var(--code-ink); padding:1px 5px; border-radius:3px;}
+  pre{background:var(--code-bg); color:var(--code-ink); border:1px solid var(--line);
+      border-radius:6px; padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.55;}
+  pre code{background:none; padding:0;}
+  .tablewrap{overflow-x:auto; margin:14px 0;}
+  table{border-collapse:collapse; font-size:13.5px; min-width:640px;
+        font-variant-numeric:tabular-nums;}
+  th{text-align:left; font-weight:600; border-bottom:2px solid var(--line);
+     padding:7px 14px 7px 0; white-space:nowrap;}
+  td{border-bottom:1px solid var(--line); padding:6px 14px 6px 0; vertical-align:top;}
+  td code, th code{white-space:nowrap;}
+  .hl td{background:var(--accent-soft);}
+  .note{background:var(--warn-bg); border-left:3px solid var(--warn); padding:10px 16px;
+        border-radius:0 6px 6px 0; margin:16px 0; max-width:72ch; font-size:14px;}
+  .note b{color:var(--warn);}
+  .ok{color:var(--accent); font-weight:600;}
+  .bad{color:var(--warn); font-weight:600;}
+  .muted{color:var(--muted);}
+  .filelist td:first-child{font-family:"SF Mono","Cascadia Code",Consolas,monospace; font-size:12.5px;}
+  a{color:var(--accent);}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+</style>
+<main>
+<header>
+  <h1>HexMaze Sweep 复现手册</h1>
+  <div class="sub">在 HexMaze 海马数据（rat6_491391 / 20260716）上检测 theta sweep、
+  并复现 Tang et&nbsp;al. 2026（Nat Neurosci）各项分析的完整方法与参数。交接给任何人后，
+  按第 7 节命令即可端到端重跑。</div>
+  <div class="meta">
+    <span>session: Rat6_20260716</span>
+    <span>98 units (good/pyramidal)</span>
+    <span>62.6 min · 375,781 × 10 ms bins</span>
+    <span>2026-08-18</span>
+  </div>
+</header>
+
+<h2><span class="no">0</span>一句话总结</h2>
+<p>该数据存在与 Tang 论文定量一致的 theta sweep（长度 21.6 vs 论文 22.0&nbsp;±&nbsp;2.5 cm，
+前向偏置），检出率较低源于细胞数与迷宫尺度（prevalence 0.167 vs 论文 ~0.45）。
+<b>没有</b>论文的逐周期左右交替（556 个 triplet 下 51.1% vs null 52.3%）；相反，所有测过的轴都呈
+<b>模式驻留</b>：前/后向 sweep 成片出现（切换率 31.7% 显著低于置换 37.7%，p=0.0005），
+且距 goal &lt;60 cm 时 94% 的 sweep 翻转为后向（回顾模式）。
+以上除 goal-sweep 特异性外，全部在第二个 session（20260717）复现——见 §12。</p>
+
+<h2><span class="no">1</span>环境</h2>
+<ul>
+  <li>conda 环境 <code>HM_sync</code>（Python 3.9.20）；依赖：pynwb、h5py、scikit-learn、scipy、numpy、pandas、matplotlib。</li>
+  <li>代码仓库：<code>~/Desktop/code/Reproduce-Theta-Sweeps-from-HexMaze-dataset</code>（包 <code>hexmaze_sweeps/</code> + 分析脚本 <code>scripts/</code>）。</li>
+  <li>并行读取同一 NWB 时必须 <code>export HDF5_USE_FILE_LOCKING=FALSE</code>（只读安全）。</li>
+  <li>网络盘 <code>/Volumes/genzel</code> 会掉线：首次运行后所有分析改从本地缓存
+      <code>results/glm_shift/cache/</code> 读，不再依赖网络盘。</li>
+</ul>
+
+<h2><span class="no">2</span>数据与已知缺陷</h2>
+<div class="tablewrap"><table>
+<tr><th>数据项</th><th>位置 / 取值</th></tr>
+<tr><td>NWB</td><td><code>/Volumes/genzel/Rat/HM/Rat_HM_Neuron/task/rat6_491391/20260716/Rat6_20260716.nwb</code></td></tr>
+<tr><td>细胞筛选</td><td><code>quality_label == "good"</code> 且 <code>cell_type == "pyramidal"</code> → 98 个</td></tr>
+<tr><td>追踪</td><td><code>processing/Behavior/Position/Rat</code>，像素坐标；<code>px_per_cm = 1.2435</code>（由 40 cm 走廊段标定）</td></tr>
+<tr><td>Goal</td><td><code>processing/Behavior/Trials_Data</code> 表的 <code>Goal_node</code> 列 = 421（全程唯一，26 个 trial）；节点坐标查 <code>node_list_new.csv</code> → (108, 423) px</td></tr>
+<tr class="hl"><td>LFP（关键坑）</td><td>NWB 内嵌 LFP 损坏（解析出 5 Hz，不可用）。真 LFP 在
+<code>&lt;session&gt;/LFP_Output/*_lfp_data.npy</code>：(5,669,424 × 32) float32 @ <b>1500 Hz</b>，
+时间戳 0 起、与 spike 同钟。通道自动选 theta/delta（6–10 vs 2–4 Hz，Welch，前 400 s）功率比最高者 → <b>channel 23</b></td></tr>
+</table></div>
+
+<h2><span class="no">3</span>预处理（<code>hexmaze_sweeps/data.py</code>）</h2>
+<ul>
+  <li>时间网格：<code>bin_s = 0.01</code>（10 ms），从 0 到 min(追踪结束, 最后一个 spike)。</li>
+  <li>速度：逐 bin 位移 / bin_s，高斯平滑 <code>speed_smooth_s = 1.0</code> s；无追踪处为 NaN。</li>
+  <li><b>moving direction</b> = 行进方向（位置梯度的 arctan2，平滑 <code>head_dir_smooth_s = 0.10</code> s）。
+      不用 DLC 头方向——该数据集 DLC 置信度列在写 NWB 时被丢弃，关键点会跳。</li>
+</ul>
+
+<h2><span class="no">4</span>Theta 相位与周期（<code>decoding.py</code>）</h2>
+<ul>
+  <li>channel 23 @1500 Hz → Butterworth 2 阶 5–10 Hz <code>filtfilt</code> → Hilbert 相位 → unwrap 后插值到 10 ms bin 中心。</li>
+  <li>相位零点重定在<b>群体放电最低的相位</b>（60 个相位 bin 求均值放电率取 argmin）。</li>
+  <li>周期 = 重定零后相位的上穿零点；仅保留时长 80–220 ms（4.5–12.5 Hz）→ 本 session 30,126 个周期，其中跑动（&gt;15 cm/s）8,617 个。</li>
+</ul>
+
+<h2><span class="no">5</span>解码器</h2>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>值</th><th>说明</th></tr>
+<tr><td><code>decoder</code></td><td><code>bayes</code></td><td>Poisson 贝叶斯、flat prior、每 bin 取后验最大位置（= Tang 公式 4）</td></tr>
+<tr><td><code>pv_smooth_bins</code></td><td><b>3</b></td><td>解码前 spike 计数矩阵高斯平滑 σ=3 bin（30 ms）。<b>28→737 的最大单一贡献项</b></td></tr>
+<tr><td><code>spatial_bin_cm</code></td><td>5</td><td>10 cm 并不更好，无需放粗</td></tr>
+<tr><td><code>rate_smooth_cm</code> / 速度门 / 占用门</td><td>7.5 / ≥5 cm/s / ≥0.25 s</td><td>rate map 构建</td></tr>
+<tr><td>anchor（低通轨迹）</td><td>每周期前 4 bin，跨 1.7 周期平滑（post 0.5）</td><td>sweep 向量的参考点</td></tr>
+<tr><td>shuffle 阈值</td><td>10,000 个打乱 bin 的 95 分位（宽档）/ 99 分位（严档）</td><td>逐 bin 后验峰值须超过它才算有效 bin</td></tr>
+</table></div>
+
+<h2><span class="no">6</span>Sweep 提取 —— Tang 约定（<code>sweeps.py</code>，<code>sweep_convention="tang"</code>）</h2>
+<p>每个 theta 周期内：(a) 找<b>最长</b>的平滑连续有效 bin 段（相邻位移 ≤ jump、转向 ≤90°）；
+(b) 段内穷举截出<b>净位移最大</b>的子段；(c) <b>sweep 向量 s</b> = 周期开始时的低通解码位置 → 子段内距该锚点最远的点；
+direction/length = s 的角度/模长；(d) 直线度 r² = 子段各点在 s 轴向上的方差占比（最远点除外）。
+原 Vollan 定义保留为 <code>--sweep-convention vollan</code>。</p>
+<div class="tablewrap"><table>
+<tr><th>门控</th><th>严档 base</th><th>宽档 relaxA（推荐）</th></tr>
+<tr><td>逐 bin：活跃细胞数</td><td colspan="2">≥ 1</td></tr>
+<tr><td>逐 bin：anchor 距动物</td><td colspan="2">≤ 50 cm</td></tr>
+<tr><td>逐 bin：后验峰 vs shuffle</td><td>99 分位</td><td><b>95 分位</b></td></tr>
+<tr><td>相邻 bin 跳跃上限</td><td>20 cm</td><td><b>25 cm</b></td></tr>
+<tr><td>相邻 bin 转向上限</td><td colspan="2">90°</td></tr>
+<tr><td>最少连续有效 bin</td><td>4（40 ms）</td><td><b>3</b></td></tr>
+<tr><td>直线度 r²</td><td>&gt; 0.5</td><td><b>&gt; 0.4</b></td></tr>
+<tr><td>跑动速度</td><td colspan="2">&gt; 15 cm/s（周期中点）</td></tr>
+<tr class="hl"><td>origin 门（sweep 近端距动物）</td><td colspan="2"><b>≤ 20 cm —— 本数据必须开启</b>：论文解码误差 ~13 cm、锚点贴身，此条件隐含成立；我们锚点会漂，不开门时长度虚高至 54 cm</td></tr>
+</table></div>
+
+<h3>各配置结果（选定配置高亮）</h3>
+<div class="tablewrap"><table>
+<tr><th>配置</th><th>sweeps</th><th>prevalence</th><th>长度 (cm)</th><th>triplets</th><th>交替 vs null</th></tr>
+<tr><td class="muted">pv 解码器, 平滑1（最初基线）</td><td>28</td><td>0.003</td><td>34.4</td><td>0</td><td>—</td></tr>
+<tr><td>vollan 约定, relaxA</td><td>1294</td><td>0.150</td><td>24.6</td><td>149</td><td>58.4% vs 50.9%（未复现，见 §10）</td></tr>
+<tr><td>tang, base + origin20</td><td>1014</td><td>0.118</td><td>20.8</td><td>250</td><td>48.8% vs 52.5%</td></tr>
+<tr class="hl"><td><b>tang, relaxA + origin20（最终）</b></td><td><b>1437</b></td><td><b>0.167</b></td><td><b>21.6</b></td><td><b>556</b></td><td><b>51.1% vs 52.3%</b></td></tr>
+<tr><td class="muted">tang, relaxA, 无 origin 门（勿用）</td><td>2589</td><td>0.300</td><td class="bad">54.4</td><td>1199</td><td>52.2% vs 50.7%</td></tr>
+</table></div>
+
+<h2><span class="no">7</span>一键复现命令</h2>
+<pre><code># 严档（主 pipeline CLI，全部已内置）
+HDF5_USE_FILE_LOCKING=FALSE python -m hexmaze_sweeps \
+    &lt;session_dir&gt;/Rat6_20260716.nwb \
+    --lfp-npy &lt;session_dir&gt;/LFP_Output --lfp-channel 23 \
+    --decoder bayes --spike-smooth-bins 3 --max-sweep-origin-cm 20
+
+# 宽档 relaxA（最终配置；scripts/run_pipeline_extlfp.py 内有拒绝原因分解打印）
+python scripts/run_pipeline_extlfp.py \
+    --decoder bayes --spike-smooth-bins 3 --spatial-bin-cm 5 \
+    --shuffle-pct 95 --min-valid-samples 3 --jump-max-cm 25 \
+    --straightness-min 0.4 --max-sweep-origin-cm 20 --tag tang_relaxA_o20
+
+# 衍生分析的依赖顺序（脚本内路径为本机绝对路径，换 session 先改头部常量）
+python scripts/make_dump_relaxA.py        # 解码+提取 → cache/*_relaxA.npz（其余脚本的输入）
+python scripts/goal_sweeps.py             # → goal_sweeps.csv + 图
+python scripts/forward_backward.py        # 依赖 goal_sweeps.csv
+python scripts/plot_fb_visualization.py   # 四联可视化
+python scripts/pooled_precession.py       # 依赖 cache/*_extlfp_session.npz（glm_shift 运行时生成）
+python -m hexmaze_sweeps.glm_shift &lt;nwb&gt; --lfp-npy &lt;dir&gt;/LFP_Output --out results/glm_shift</code></pre>
+
+<h2><span class="no">8</span>衍生分析：方法与参数</h2>
+
+<h3>8.1 相位进动（<code>scripts/pooled_precession.py</code>）—— sweep 存在性的独立证据</h3>
+<ul>
+  <li>细胞入选：跑动（≥15 cm/s）中<b>场内 spike ≥100</b>（不要按 bits/spike 选，偏爱稀疏细胞）。场峰取 2.5 cm bin、σ=2 bin 平滑 rate map 的 argmax；场窗 = 峰周 20 cm。</li>
+  <li>圆-线性拟合：斜率格点 ±30°/cm × 241 点，最大化合成向量长 R；零假设 = 各细胞相位整体随机旋转 + 配对打乱，200 次。</li>
+  <li><b>结果：41 细胞 / 10,303 spikes，斜率 −7.9°/cm，85% 细胞为负，R=0.221 ≫ shuffle 97.5 分位 0.069。</b></li>
+</ul>
+
+<h3>8.2 单细胞 GLM shift model（<code>hexmaze_sweeps/glm_shift.py</code>，Tang 方法三改）</h3>
+<ul>
+  <li>模型：逐细胞 <code>y ~ Poiss(exp(β₀+βX))</code>；协变量 = 位置（2D 高斯基，10 cm 三角网格，σ=5 cm<span class="muted">（论文 2 cm，10 cm 网格下覆盖有空洞，故改；可 <code>--pos-sigma-cm 2</code> 复原）</span>，buffer 30 cm）+ moving direction 与 theta 相位（各 50 个 Von Mises 基，κ=10）；各组 PCA 保 99% 方差（2883→607、50→11、50→11）后 z-score；sklearn <code>PoissonRegressor(alpha=1e-4, max_iter=500)</code>；拟合速度门 ≥10、评估 ≥15 cm/s。</li>
+  <li>读出：位置协变量沿 moving direction 平移 d ∈ [−30, +45] cm（步长 2.5），log-rate 以未平移最大值 + ln2 封顶；12 个相位 bin；<b>逐 bin 位移后验均值</b>按相位平均（总似然 argmax 会被 d=0 钉死，不灵敏）；null = 相位标签整体时间平移 ×200。</li>
+  <li><b>结果：位移曲线峰-峰 4.8 cm（p=0.005，恒为正 +1.4→+6.2 cm；后验收缩使其为下界）。</b></li>
+</ul>
+
+<h3>8.3 Goal sweeps（<code>scripts/goal_sweeps.py</code>，对应 Tang Fig. 1f–l）</h3>
+<ul>
+  <li>sweep 方位 = 动物位置 → 段内距动物最远点；goal 方位 = 动物 → goal(421)；对齐判据 |夹角| ≤ 10°。</li>
+  <li>空间零假设：其余 95 个节点（距真 goal &gt;60 cm）作 pseudo-goal，各自算对齐率（剔除动物距 pseudo &lt;20 cm 的 sweep）。</li>
+  <li><b>结果：15.4% 对齐 goal（论文 16.3±4.4%）；真 goal 位于 pseudo 分布 94 分位（边缘，p≈0.06）；对齐率随距离上升（&gt;2.6 m 处 27%）。</b></li>
+  <li class="muted">混淆声明：本 session 单 goal，无法做论文的三 goal 去混淆控制；heading 不朝 goal 时 goal 对齐（8.2%）≈ heading 对齐（10.3%），提示 goal 调谐大半由"朝 goal 跑 + 前向扫"承载。</li>
+</ul>
+
+<h3>8.4 前向/后向结构（<code>scripts/forward_backward.py</code> + <code>plot_fb_visualization.py</code>）</h3>
+<ul>
+  <li>分类：|sweep − heading| ≤60° = F；≥120° = B；其余侧向。结果 F 681 / B 560 / L 196。</li>
+  <li><b>近 goal 回顾翻转：距 goal ≤60 cm 时 94% 为 B（n=48）；60–120 cm 56%；&gt;90 cm/s 冲刺时 B 仅 30%。</b>F/B 中位速度相同（51/49 cm/s）——B 不是低速噪声。</li>
+  <li><b>模式驻留（非交替）：663 对相邻周期切换率 31.7%，episode 内置换 null 37.7%（2000 次），p(持续)=0.0005；严格 F-B-F 三连 12.8%（独立期望 ~25%）。</b></li>
+</ul>
+
+<h2><span class="no">9</span>结果对照总表</h2>
+<div class="tablewrap"><table>
+<tr><th>指标</th><th>Tang 2026（开阔场，~240+ 细胞）</th><th>本 session（走廊迷宫，83 细胞）</th><th>判定</th></tr>
+<tr><td>sweep 长度</td><td>22.0 ± 2.5 cm</td><td>21.6 cm</td><td class="ok">匹配</td></tr>
+<tr><td>相位进动 / 位移随相位增大</td><td>✓</td><td>−7.9°/cm；4.8 cm 位移曲线</td><td class="ok">匹配</td></tr>
+<tr><td>方向前向偏置</td><td>lateral ±30°</td><td>52–62% 在 ±60° 内</td><td class="ok">匹配</td></tr>
+<tr><td>goal-sweep 占比</td><td>16.3 ± 4.4%</td><td>15.4%（特异性 94 分位）</td><td class="ok">匹配（特异性边缘）</td></tr>
+<tr><td>prevalence</td><td>~0.40–0.50</td><td>0.167</td><td class="bad">偏低（细胞数/迷宫尺度）</td></tr>
+<tr><td>左右交替</td><td>60–75% ≫ shuffle</td><td>51.1% ≈ null（556 triplets）</td><td class="bad">未复现——模式驻留替代</td></tr>
+</table></div>
+
+<h2><span class="no">10</span>注意事项（按踩坑顺序）</h2>
+<ol>
+  <li><b>NWB 内嵌 LFP 不可用</b>（伪 5 Hz）。一切 theta 相关都必须走 <code>--lfp-npy</code>。备选 <code>--theta pca</code>（群体重建相位）质量较差，仅作 fallback。</li>
+  <li><b>解码饥饿是检出瓶颈</b>：81%（严档）的跑动周期凑不齐连续有效 bin；形状门（直线度中位 0.96）几乎不拒绝。调灵敏度应调 shuffle 分位 / 最少 bin / 跳跃上限，而不是直线度。</li>
+  <li><b>Tang 约定必须配 origin 门</b>（§6 高亮行），否则长度被锚点漂移污染。</li>
+  <li><b>交替性结论对方向定义敏感</b>：vollan 约定 149 个 triplet 上曾出现 58.4%"疑似交替"，在更准的 tang 方向 + 556 triplet 下消失。报告交替性一律用 tang 约定。</li>
+  <li>近 goal 后向翻转已跨 session 复现（day1 94%/n=48，day2 90%/n=109，见 §12）；reward 区
+      place field 密度对解码的潜在偏置仍值得在更多动物上排查。</li>
+  <li>goal-sweep 特异性<b>未</b>跨 session 复现（day1 94 分位，day2 46 分位）——day1 的边缘结果按噪声
+      处理；本数据集（单 goal、走廊）目前不支持论文式 goal-sweep 结论。</li>
+  <li>GLM 位置基 σ=5 cm 系有意偏离论文（2 cm）；严格复现加 <code>--pos-sigma-cm 2</code>。</li>
+  <li>脚本内数据路径为本机绝对路径；换机器/换 session 改各脚本头部常量即可，分析全部从 <code>results/glm_shift/cache/</code> 的两个 npz 出发（解码 dump + session 缓存），不必重读 NWB。</li>
+</ol>
+
+<h2><span class="no">11</span>文件清单</h2>
+<div class="tablewrap"><table class="filelist">
+<tr><th>路径</th><th>内容</th></tr>
+<tr><td>hexmaze_sweeps/{config,data,decoding,sweeps,pipeline}.py</td><td>主 pipeline；本次新增外部 LFP 支持与 tang 约定（含 CLI 开关）</td></tr>
+<tr><td>hexmaze_sweeps/glm_shift.py</td><td>GLM shift model 完整实现（新模块）</td></tr>
+<tr><td>scripts/*.py</td><td>本手册 §7–8 的全部分析与绘图脚本（12 个）</td></tr>
+<tr><td>results/glm_shift/cache/*_relaxA.npz</td><td>最终配置的解码+sweep dump（1437 个 sweep；含轨迹、方向、origin）</td></tr>
+<tr><td>results/glm_shift/cache/*_extlfp_session.npz</td><td>binned session + theta 相位缓存（脱离网络盘的关键）</td></tr>
+<tr><td>results/glm_shift/*.png|.npz|.csv</td><td>各分析图与数值结果（GLM、进动、锁相、goal、pipeline 汇总图）</td></tr>
+<tr><td>~/Desktop/Rat6_20260716_all_sweeps/</td><td>1437 张逐 sweep 图（路径 + 群体放电率）+ sweep_index.csv</td></tr>
+<tr><td>~/Desktop/Rat6_20260716_sweep_episodes/</td><td>174 个连续 sweep episode 图（最长 17 周期）+ episode_index.csv</td></tr>
+<tr><td>~/Desktop/Rat6_20260716_{sweeps_ratcentered,examples_evenodd,goal_sweeps,forward_backward,FB_visualization}.png</td><td>汇总图五张</td></tr>
+</table></div>
+
+<h2><span class="no">12</span>跨 session 验证（20260717，同鼠次日，goal 仍为 421）</h2>
+<p>96 个 good/pyramidal 单元、64.0 min。同一套命令直接重跑（runner 已 session 化：
+<code>--session-dir</code>，LFP 通道自动选中同为 23）。</p>
+<div class="tablewrap"><table>
+<tr><th>检验</th><th>20260716</th><th>20260717</th><th>复现</th></tr>
+<tr><td>prevalence / sweeps</td><td>0.167（1437/8617）</td><td>0.153（1178/7677）</td><td class="ok">✓</td></tr>
+<tr><td>sweep 长度</td><td>21.6 cm</td><td>30.3 cm</td><td class="ok">✓（量级一致，偏长）</td></tr>
+<tr><td>相位进动</td><td>−7.88°/cm，R=0.221（41 细胞，85% 负）</td><td>−7.88°/cm，R=0.217（47 细胞，83% 负）</td><td class="ok">✓✓ 几乎逐字</td></tr>
+<tr><td>GLM 位移曲线</td><td>4.8 cm，p=0.005</td><td>3.8 cm，p=0.005</td><td class="ok">✓</td></tr>
+<tr><td>左右交替</td><td>51.1% vs null 52.3%（556 trip）</td><td>50.3% vs null 53.2%（523 trip）</td><td class="ok">✓ 两天均无</td></tr>
+<tr class="hl"><td>F/B 模式驻留</td><td>切换 31.7% vs null 37.7%，p=0.0005</td><td>切换 30.0% vs null 39.1%，p=0.0005</td><td class="ok">✓✓</td></tr>
+<tr class="hl"><td>近 goal 后向翻转（≤60 cm）</td><td>94%（n=48）</td><td>90%（n=109）</td><td class="ok">✓✓</td></tr>
+<tr><td>速度倒 U（快跑→前向）</td><td>&gt;90 cm/s 时 B 30%</td><td>&gt;90 cm/s 时 B 33%</td><td class="ok">✓</td></tr>
+<tr><td>goal-sweep 特异性</td><td>15.4%，pseudo 94 分位</td><td>10.2%，pseudo 46 分位</td><td class="bad">✗ 未复现</td></tr>
+</table></div>
+
+<h2><span class="no">13</span>完整参数表（逐条）</h2>
+<p>最终配置的每一个可调参数。「≠默认」列标注与仓库 <code>Config</code> 默认值不同、复现时<b>必须显式设置</b>的项；
+「≠论文」标注与 Tang 论文的有意偏离。</p>
+
+<h3>A · 常数与数据标定</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>值</th><th>含义</th></tr>
+<tr><td><code>px_per_cm</code></td><td>1.2435</td><td>像素→厘米，由 40 cm 走廊段（<code>SEGMENT_CM</code>）标定</td></tr>
+<tr><td><code>bin_s</code></td><td>0.01 s</td><td>所有分析的时间 bin（10 ms）</td></tr>
+<tr><td>外部 LFP 采样率</td><td>1500 Hz</td><td><code>LFP_Output/*_lfp_data.npy</code>，(样本 × 32 通道)</td></tr>
+<tr><td>LFP 通道</td><td>23（自动）</td><td>theta/delta（6–10 vs 2–4 Hz）功率比最高者；两个 session 均自动选中 23</td></tr>
+<tr><td>goal 节点</td><td>421 → (108, 423) px</td><td>NWB <code>Trials_Data.Goal_node</code>；坐标查 <code>node_list_new.csv</code></td></tr>
+</table></div>
+
+<h3>B · 预处理与 theta（<code>Config</code>）</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>值</th><th>含义</th><th>≠默认</th></tr>
+<tr><td><code>quality</code> / <code>cell_types</code></td><td>("good",) / ("pyramidal",)</td><td>细胞筛选</td><td></td></tr>
+<tr><td><code>speed_smooth_s</code></td><td>1.0 s</td><td>速度高斯平滑</td><td></td></tr>
+<tr><td><code>head_dir_smooth_s</code></td><td>0.10 s</td><td>moving direction（行进方向）平滑</td><td></td></tr>
+<tr><td><code>head_direction_source</code></td><td>travel</td><td>用行进方向，不用 DLC（置信度列缺失）</td><td></td></tr>
+<tr><td><code>theta_band_hz</code></td><td>(5, 10)</td><td>Butterworth 2 阶带通 + filtfilt + Hilbert</td><td></td></tr>
+<tr><td><code>cycle_min_s</code> / <code>cycle_max_s</code></td><td>0.08 / 0.22 s</td><td>合法 theta 周期时长（4.5–12.5 Hz）</td><td></td></tr>
+<tr><td>相位零点</td><td>群体放电最低相位</td><td>60 个相位 bin 求 argmin 后整体平移</td><td></td></tr>
+<tr><td><code>external_lfp_npy / _fs / _channel</code></td><td>&lt;dir&gt;/LFP_Output / 1500 / None(自动)</td><td>外部 LFP（NWB 内嵌不可用）</td><td class="bad">✓ 必设</td></tr>
+</table></div>
+
+<h3>C · Rate map、解码器与 anchor（<code>Config</code>）</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>值</th><th>含义</th><th>≠默认</th></tr>
+<tr><td><code>spatial_bin_cm</code></td><td>5.0</td><td>空间 bin；10 cm 不更好</td><td></td></tr>
+<tr><td><code>rate_smooth_cm</code></td><td>7.5</td><td>rate map 高斯平滑</td><td></td></tr>
+<tr><td><code>speed_spatial_cm_s</code> / <code>min_occupancy_s</code></td><td>5.0 / 0.25</td><td>rate map 的速度门与占用门</td><td></td></tr>
+<tr><td><code>decoder</code> / <code>bayes_prior</code></td><td>bayes / uniform</td><td>Poisson 贝叶斯，flat prior，逐 bin argmax</td><td class="bad">✓（默认 pv）</td></tr>
+<tr><td><code>bayes_min_rate_hz</code></td><td>1e-3</td><td>发放率下限，防 log(0)</td><td></td></tr>
+<tr><td><code>pv_smooth_bins</code></td><td><b>3</b>（30 ms）</td><td>解码前 spike 计数平滑。<b>检出率的最大单一因素</b></td><td class="bad">✓（默认 1）</td></tr>
+<tr><td><code>decoded_smooth_bins</code> / <code>lowpass_smooth_bins</code></td><td>1.0 / 1.0</td><td>解码轨迹 / anchor 的平滑</td><td></td></tr>
+<tr><td><code>anchor_n_bins</code> / <code>anchor_smooth_cycles</code> / <code>anchor_post_smooth_cycles</code></td><td>4 / 1.7 / 0.5</td><td>低通 anchor：每周期前 40 ms，跨周期平滑</td><td></td></tr>
+</table></div>
+
+<h3>D · 逐 bin 可靠性门（<code>Config</code>）</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>严档 base</th><th>宽档 relaxA（最终）</th><th>含义</th></tr>
+<tr><td><code>n_shuffle_bins</code></td><td colspan="2">10,000</td><td>零假设 bin 数</td></tr>
+<tr><td><code>shuffle_percentile</code></td><td>99</td><td><b>95</b></td><td>后验峰值须超过的分位</td></tr>
+<tr><td><code>min_active_cells</code></td><td colspan="2">1</td><td>bin 内最少活跃细胞</td></tr>
+<tr><td><code>max_lowpass_error_cm</code></td><td colspan="2">50</td><td>anchor 距动物上限（解码跟丢判据）</td></tr>
+</table></div>
+
+<h3>E · Sweep 提取（<code>Config</code>，tang 约定）</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>严档 base</th><th>宽档 relaxA（最终）</th><th>含义</th></tr>
+<tr><td><code>sweep_convention</code></td><td colspan="2"><b>tang</b></td><td>最长平滑段 + 净位移截断 + 周期起点锚向量（<code>vollan</code> 为原版）</td></tr>
+<tr><td><code>jump_max_cm</code></td><td>20</td><td><b>25</b></td><td>相邻 bin 位移上限</td></tr>
+<tr><td><code>turn_max_rad</code></td><td colspan="2">π/2（90°）</td><td>相邻 bin 转向上限</td></tr>
+<tr><td><code>min_valid_samples</code></td><td>4</td><td><b>3</b></td><td>最少连续有效 bin</td></tr>
+<tr><td><code>straightness_min</code></td><td>0.5</td><td><b>0.4</b></td><td>r² 直线度下限</td></tr>
+<tr><td><code>speed_sweep_cm_s</code></td><td colspan="2">15</td><td>跑动门（周期中点速度）</td></tr>
+<tr><td><code>max_sweep_origin_cm</code></td><td colspan="2"><b>20 —— 必设</b></td><td>sweep 近端距动物上限；本数据不设则长度虚高至 54 cm</td></tr>
+<tr><td><code>max_sweep_head_angle_deg</code></td><td colspan="2">None（关）</td><td>前向门，未使用</td></tr>
+</table></div>
+
+<h3>F · GLM shift model（<code>python -m hexmaze_sweeps.glm_shift</code> 的 CLI 默认）</h3>
+<div class="tablewrap"><table>
+<tr><th>参数</th><th>值</th><th>含义</th><th>≠论文</th></tr>
+<tr><td><code>--pos-spacing-cm</code> / <code>--pos-sigma-cm</code></td><td>10 / <b>5</b></td><td>位置高斯基：三角网格间距 / 宽度</td><td class="bad">论文 σ=2（10 cm 网格下留覆盖空洞，故改；<code>--pos-sigma-cm 2</code> 可复原）</td></tr>
+<tr><td><code>--buffer-cm</code></td><td>30</td><td>基函数越出走廊的外推缓冲带</td><td></td></tr>
+<tr><td><code>--n-dir-basis</code> / <code>--n-phase-basis</code> / <code>--kappa</code></td><td>50 / 50 / 10</td><td>方向与相位的 Von Mises 基</td><td></td></tr>
+<tr><td><code>--pca-variance</code></td><td>0.99</td><td>每组基 PCA 保留方差（位置 ~2890→~600 维）</td><td></td></tr>
+<tr><td><code>--alpha</code> / <code>--max-iter</code></td><td>1e-4 / 500</td><td>sklearn PoissonRegressor 的 L2 与迭代上限</td><td></td></tr>
+<tr><td><code>--min-spikes</code> / <code>--min-bits-per-spike</code></td><td>100 / 0.05</td><td>细胞入选门槛</td><td></td></tr>
+<tr><td><code>--fit-speed-cm-s</code> / <code>--eval-speed-cm-s</code></td><td>10 / 15</td><td>拟合 / 评估的速度门</td><td></td></tr>
+<tr><td><code>--shift-min/max/step-cm</code></td><td>−30 / +45 / 2.5</td><td>沿 moving direction 的平移格点</td><td></td></tr>
+<tr><td><code>--n-phase-bins</code> / <code>--n-permutations</code></td><td>12 / 200</td><td>相位分箱 / 相位标签时间平移零假设</td><td></td></tr>
+<tr><td>log-rate 封顶</td><td>未平移最大 + ln2</td><td>抑制 buffer 区外推爆炸（代码内置）</td><td></td></tr>
+</table></div>
+
+<h3>G · 衍生分析脚本常数（<code>scripts/</code> 各文件头部）</h3>
+<div class="tablewrap"><table>
+<tr><th>脚本</th><th>参数</th><th>值</th></tr>
+<tr><td rowspan="4">pooled_precession.py</td><td>跑动门 / 场半径</td><td>≥15 cm/s / 20 cm（场峰取 2.5 cm-bin、σ=2 bin 平滑 rate map 的 argmax）</td></tr>
+<tr><td>细胞入选</td><td>场内 spike ≥ 100（<b>勿用 bits/spike 选</b>）</td></tr>
+<tr><td>圆-线性拟合斜率格点</td><td>±30°/cm、241 点（合并拟合 481 点）</td></tr>
+<tr><td>零假设</td><td>逐细胞相位随机旋转 + 配对打乱 × 200</td></tr>
+<tr><td rowspan="3">goal_sweeps.py</td><td>对齐判据</td><td>|sweep方位 − goal方位| ≤ 10°（方位均以动物为原点；sweep 取距动物最远点）</td></tr>
+<tr><td>pseudo-goal 零假设</td><td>其余节点中距真 goal &gt;60 cm 者（95 个）；剔除动物距 (pseudo)goal &lt;20 cm 的 sweep</td></tr>
+<tr><td>距离分箱</td><td>[20, 60, 100, 140, 180, 260, 400] cm</td></tr>
+<tr><td rowspan="4">forward_backward.py</td><td>F / B 分类</td><td>|sweep − heading| ≤ 60° = F；≥ 120° = B；其余侧向（不入配对）</td></tr>
+<tr><td>episode 定义</td><td>周期序号连续且间隔 &lt; 0.25 s 的 sweep 串</td></tr>
+<tr><td>驻留检验</td><td>episode 内标签置换 × 2000；统计相邻对切换率</td></tr>
+<tr><td>行为分箱</td><td>速度 [15,25,35,45,60,80,110]；距 goal [0,60,120,180,260,400]；离 reward [0,10,20,40,80,160,400]</td></tr>
+<tr><td rowspan="2">plot_fb_visualization.py</td><td>空间后向占比图</td><td>30 cm bin，≥8 个 F/B sweep 才上色</td></tr>
+<tr><td>条码 / streak</td><td>episode ≥4 个 sweep，前 60 行；streak 零假设置换 × 500</td></tr>
+<tr><td>theta_diagnostics.py</td><td>PSD / 锁相</td><td>Welch 4 s 段 × 40；24 相位 bin；MRL 需 ≥50 spikes</td></tr>
+</table></div>
+
+<h3>H · 运行环境</h3>
+<div class="tablewrap"><table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>conda 环境</td><td><code>HM_sync</code>（Python 3.9.20；pynwb, h5py, scikit-learn, scipy, numpy, pandas, matplotlib）</td></tr>
+<tr><td>环境变量</td><td><code>HDF5_USE_FILE_LOCKING=FALSE</code>（并行读同一 NWB 必需）</td></tr>
+<tr><td>随机种子</td><td>各脚本内固定（<code>default_rng(0)</code>），置换检验结果可精确复算</td></tr>
+</table></div>
+
+<p class="muted" style="margin-top:44px;border-top:1px solid var(--line);padding-top:14px;">
+参考：Tang, Mei, Harvey et al., <i>Goal-directed hippocampal theta sweeps during memory-guided
+navigation</i>, Nat Neurosci (2026), doi:10.1038/s41593-026-02364-3 —— sweep 检测与 goal 分析的约定出处；
+Vollan et al. (2025) —— 原始逐周期检测算法（<code>--sweep-convention vollan</code>）。</p>
+</main>

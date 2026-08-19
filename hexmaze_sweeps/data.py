@@ -323,6 +323,42 @@ def _dlc_head_direction(nwb, bin_centers_s, config: Config) -> np.ndarray:
     return np.arctan2(sine, cosine)
 
 
+def _external_lfp_channel(config: Config, n_bins: int) -> np.ndarray:
+    """One channel of an externally exported (n_samples, n_channels) LFP .npy.
+
+    Used when the NWB's own LFP is unusable (see docs/data-issues.md). The export is
+    assumed to start on the ephys clock's zero, like the spike times.
+    """
+    import glob
+
+    path = config.external_lfp_npy
+    if os.path.isdir(path):
+        # some sessions prefix the file with the session name, some don't
+        matches = sorted(glob.glob(os.path.join(path, "*lfp_data.npy")))
+        if not matches:
+            raise FileNotFoundError(f"no *lfp_data.npy in {path}")
+        path = matches[0]
+
+    data = np.load(path, mmap_mode="r")
+    fs = config.external_lfp_fs
+
+    channel = config.external_lfp_channel
+    if channel is None:
+        probe = np.asarray(data[: int(min(400 * fs, data.shape[0]))], np.float32)
+        freq, power = welch(probe, fs=fs, nperseg=int(8 * fs), axis=0)
+        theta = power[(freq >= 6) & (freq <= 10)].mean(0)
+        delta = power[(freq >= 2) & (freq <= 4)].mean(0)
+        channel = int(np.argmax(theta / delta))
+
+    n_samples = min(int(n_bins * config.bin_s * fs), data.shape[0])
+    signal = np.empty(n_samples)
+    step = int(fs * 600)          # column of a row-major mmap, in chunks
+    for start in range(0, n_samples, step):
+        stop = min(start + step, n_samples)
+        signal[start:stop] = data[start:stop, channel]
+    return signal
+
+
 def _pick_theta_channel(lfp, lfp_rate_hz: float, n_bins: int, config: Config) -> np.ndarray:
     """Return the channel with the most theta (6-10 Hz) power relative to delta (2-4 Hz)."""
     n_probe_samples = int(min(400 * lfp_rate_hz, lfp.data.shape[0]))
@@ -396,7 +432,10 @@ def load_session(nwb_path: str, node_csv_path: str, config: Config) -> tuple[Ses
 
     # --- 5. LFP --------------------------------------
     lfp_theta_channel, lfp_rate_hz = None, 0.0
-    if "lfp" in nwb.acquisition:
+    if config.external_lfp_npy is not None:
+        lfp_theta_channel = _external_lfp_channel(config, n_bins)
+        lfp_rate_hz = config.external_lfp_fs
+    elif "lfp" in nwb.acquisition:
         lfp = nwb.acquisition["lfp"]
         # The rate follows from how long the *electrical* recording ran, so pass the
         # last spike time rather than session_end_s (the camera may stop earlier).
